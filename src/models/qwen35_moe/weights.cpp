@@ -3,10 +3,28 @@
 #include <initializer_list>
 #include <string>
 #include <utility>
+#include <vector>
+
+#if defined(ENGINE_ENABLE_HIP)
+#include <hip/hip_runtime.h>
+#include "src/core/hip/managed_alloc.hpp"
+#include "src/core/hip/weight_upload.hpp"
+#endif
 
 #include "src/core/quant/ggml_dequant.hpp"
 
 namespace gufo::models::qwen35_moe {
+
+ModelWeights::~ModelWeights() {
+#if defined(ENGINE_ENABLE_HIP)
+  for (void* p : allocations) {
+    if (p != nullptr) {
+      (void)hipFree(p);
+    }
+  }
+  allocations.clear();
+#endif
+}
 
 std::size_t TensorRef::RowBytes() const noexcept {
   return quant::EncodedSizeBytes(type, static_cast<std::size_t>(cols));
@@ -77,7 +95,8 @@ struct Binder {
 }  // namespace
 
 std::unique_ptr<ModelWeights> ModelWeights::FromGguf(
-    const core::GgufReader& reader, std::string* error_msg) {
+    const core::GgufReader& reader, std::string* error_msg,
+    bool upload_to_device) {
   auto cfg = Config::FromGguf(reader, error_msg);
   if (!cfg.has_value()) {
     return nullptr;
@@ -201,6 +220,101 @@ std::unique_ptr<ModelWeights> ModelWeights::FromGguf(
       return nullptr;
     }
   }
+
+#if defined(ENGINE_ENABLE_HIP)
+  if (upload_to_device) {
+    std::vector<TensorRef*> to_upload;
+    to_upload.push_back(&w->token_embd);
+    to_upload.push_back(&w->output_norm);
+    if (!w->output.empty() && w->output.data != w->token_embd.data) {
+      to_upload.push_back(&w->output);
+    }
+
+    for (auto& layer : w->layers) {
+      to_upload.push_back(&layer.attn_norm);
+      to_upload.push_back(&layer.post_attention_norm);
+      if (layer.is_full_attention) {
+        to_upload.push_back(&layer.attn_q);
+        to_upload.push_back(&layer.attn_k);
+        to_upload.push_back(&layer.attn_v);
+        to_upload.push_back(&layer.attn_output);
+        to_upload.push_back(&layer.attn_q_norm);
+        to_upload.push_back(&layer.attn_k_norm);
+      } else {
+        to_upload.push_back(&layer.ssm_qkv);
+        to_upload.push_back(&layer.ssm_gate);
+        to_upload.push_back(&layer.ssm_conv1d);
+        to_upload.push_back(&layer.ssm_dt);
+        to_upload.push_back(&layer.ssm_a);
+        to_upload.push_back(&layer.ssm_beta);
+        to_upload.push_back(&layer.ssm_alpha);
+        to_upload.push_back(&layer.ssm_norm);
+        to_upload.push_back(&layer.ssm_out);
+      }
+      to_upload.push_back(&layer.ffn_gate_inp);
+      to_upload.push_back(&layer.ffn_gate_exps);
+      to_upload.push_back(&layer.ffn_up_exps);
+      to_upload.push_back(&layer.ffn_down_exps);
+      to_upload.push_back(&layer.ffn_gate_shexp);
+      to_upload.push_back(&layer.ffn_up_shexp);
+      to_upload.push_back(&layer.ffn_down_shexp);
+      if (!layer.ffn_gate_inp_shexp.empty()) {
+        to_upload.push_back(&layer.ffn_gate_inp_shexp);
+      }
+    }
+
+    std::uint64_t total_bytes = 0;
+    for (const auto* t : to_upload) {
+      if (t != nullptr && !t->empty()) {
+        total_bytes += t->SizeBytes() + 256;
+      }
+    }
+
+    const auto regions = reader.GetMappedRegions();
+    std::vector<core::GgufMappedRegion> shards(regions.begin(), regions.end());
+    auto uploader = hip::WeightUpload::Create(shards, error_msg);
+    if (!uploader) {
+      return nullptr;
+    }
+    const hip::WeightAllocator allocator(total_bytes);
+
+    for (auto* t : to_upload) {
+      if (t == nullptr || t->empty()) continue;
+      const void* host_src = t->data;
+      void* dev_ptr = nullptr;
+      const std::size_t size = t->SizeBytes();
+      if (allocator.Allocate(&dev_ptr, size + 256) != hipSuccess) {
+        if (error_msg != nullptr) {
+          *error_msg = "Device allocation failed for " + std::string(t->name);
+        }
+        return nullptr;
+      }
+      w->allocations.push_back(dev_ptr);
+      if (!uploader->CopyMapped(host_src, size, dev_ptr, error_msg)) {
+        return nullptr;
+      }
+      (void)hipMemsetAsync(static_cast<std::uint8_t*>(dev_ptr) + size, 0, 256, nullptr);
+      t->data = dev_ptr;
+    }
+
+    if (w->output.data == w->token_embd.data) {
+      w->output.data = w->token_embd.data;
+    }
+
+    if (!uploader->Finish(error_msg)) {
+      return nullptr;
+    }
+    const hipError_t status = hipDeviceSynchronize();
+    if (status != hipSuccess) {
+      if (error_msg != nullptr) {
+        *error_msg = "Weight upload sync failed: " + std::string(hipGetErrorString(status));
+      }
+      return nullptr;
+    }
+  }
+#else
+  (void)upload_to_device;
+#endif
 
   return w;
 }

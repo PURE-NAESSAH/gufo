@@ -84,9 +84,13 @@ struct ModelWeights {
   TensorRef output_norm;  ///< [hidden_size]
   TensorRef output;       ///< [hidden_size, vocab_size]
   std::vector<LayerWeights> layers;
+  std::vector<void*> allocations;
+
+  ~ModelWeights();
 
   [[nodiscard]] static std::unique_ptr<ModelWeights> FromGguf(
-      const core::GgufReader& reader, std::string* error_msg = nullptr);
+      const core::GgufReader& reader, std::string* error_msg = nullptr,
+      bool upload_to_device = true);
 };
 
 }  // namespace gufo::models::qwen35_moe

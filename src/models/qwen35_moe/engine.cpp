@@ -135,6 +135,9 @@ Session::Session(std::shared_ptr<const Model> model, std::uint32_t max_context)
       ssm_state_(model_->config()),
       scratch_(model_->config(), max_context_) {
   logits_.resize(model_->config().vocab_size, 0.0f);
+#if defined(ENGINE_ENABLE_HIP)
+  gpu_state_.Allocate(model_->config(), max_context_);
+#endif
 }
 
 void Session::Reset() {
@@ -143,6 +146,9 @@ void Session::Reset() {
   kv_cache_.Reset();
   ssm_state_.Reset();
   vision_prompt_.reset();
+#if defined(ENGINE_ENABLE_HIP)
+  gpu_state_.Reset(model_->config(), max_context_);
+#endif
 }
 
 std::size_t Session::AllocatedBytes() const noexcept {
@@ -203,8 +209,13 @@ bool Session::Sync(std::span<const std::int32_t> prompt,
     std::span<float> out_logits =
         is_last ? std::span<float>(logits_) : std::span<float>{};
 
+#if defined(ENGINE_ENABLE_HIP)
+    hip::ForwardModelGpu(static_cast<std::uint32_t>(token), pos, model_->weights(),
+                         gpu_state_, out_logits);
+#else
     ForwardModel(static_cast<std::uint32_t>(token), pos, model_->weights(),
                  kv_cache_, ssm_state_, scratch_, out_logits);
+#endif
     tokens_.push_back(token);
   }
 
@@ -221,8 +232,13 @@ bool Session::Evaluate(std::int32_t token, std::string* error_msg) {
     return false;
   }
 
+#if defined(ENGINE_ENABLE_HIP)
+  hip::ForwardModelGpu(static_cast<std::uint32_t>(token), pos, model_->weights(),
+                       gpu_state_, std::span<float>(logits_));
+#else
   ForwardModel(static_cast<std::uint32_t>(token), pos, model_->weights(),
                kv_cache_, ssm_state_, scratch_, std::span<float>(logits_));
+#endif
 
   tokens_.push_back(token);
   valid_ = true;

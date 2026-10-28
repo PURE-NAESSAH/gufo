@@ -31,7 +31,7 @@ static __device__ __forceinline__ int rocmfp4_get_qs_i32(const void * x, const i
 // Avoiding the table pointer keeps the ROCm/HIP MMVQ/MMQ hot path fully local
 // to this format.
 static __device__ __forceinline__ int2 rocmfp4_get_int_from_codebook_16(const int & q4, const int8_t * fallback_table) {
-#if defined(GGML_USE_HIP)
+#if defined(__AMDGCN__) || defined(GGML_USE_HIP) || defined(__HIP_PLATFORM_AMD__)
     constexpr uint32_t values0 = 0x03020100u;
     constexpr uint32_t values1 = 0x0a080604u;
     constexpr uint32_t values2 = 0xfdfeff00u;
@@ -52,12 +52,28 @@ static __device__ __forceinline__ int2 rocmfp4_get_int_from_codebook_16(const in
         __builtin_amdgcn_perm(v_even_high, v_even_low, mask_even),
         __builtin_amdgcn_perm(v_odd_high,  v_odd_low,  mask_odd));
 #else
-    return get_int_from_table_16(q4, fallback_table);
+    int2 res;
+    if (fallback_table) {
+        uint8_t b0 = static_cast<uint8_t>(fallback_table[(q4 >> 0) & 0xf]);
+        uint8_t b1 = static_cast<uint8_t>(fallback_table[(q4 >> 8) & 0xf]);
+        uint8_t b2 = static_cast<uint8_t>(fallback_table[(q4 >> 16) & 0xf]);
+        uint8_t b3 = static_cast<uint8_t>(fallback_table[(q4 >> 24) & 0xf]);
+        res.x = static_cast<int>(b0 | (b1 << 8) | (b2 << 16) | (b3 << 24));
+        uint8_t b4 = static_cast<uint8_t>(fallback_table[(q4 >> 4) & 0xf]);
+        uint8_t b5 = static_cast<uint8_t>(fallback_table[(q4 >> 12) & 0xf]);
+        uint8_t b6 = static_cast<uint8_t>(fallback_table[(q4 >> 20) & 0xf]);
+        uint8_t b7 = static_cast<uint8_t>(fallback_table[(q4 >> 28) & 0xf]);
+        res.y = static_cast<int>(b4 | (b5 << 8) | (b6 << 16) | (b7 << 24));
+    } else {
+        res.x = 0;
+        res.y = 0;
+    }
+    return res;
 #endif
 }
 
 static __device__ __forceinline__ int rocmfp4_get_low_int_from_codebook_16(const int & q4, const int8_t * fallback_table) {
-#if defined(GGML_USE_HIP)
+#if defined(__AMDGCN__) || defined(GGML_USE_HIP) || defined(__HIP_PLATFORM_AMD__)
     constexpr uint32_t values0 = 0x03020100u;
     constexpr uint32_t values1 = 0x0a080604u;
     constexpr uint32_t values2 = 0xfdfeff00u;
@@ -71,6 +87,13 @@ static __device__ __forceinline__ int rocmfp4_get_low_int_from_codebook_16(const
 
     return __builtin_amdgcn_perm(v_high, v_low, mask);
 #else
-    return get_int_from_table_16(q4, fallback_table).x;
+    if (fallback_table) {
+        uint8_t b0 = static_cast<uint8_t>(fallback_table[(q4 >> 0) & 0xf]);
+        uint8_t b1 = static_cast<uint8_t>(fallback_table[(q4 >> 8) & 0xf]);
+        uint8_t b2 = static_cast<uint8_t>(fallback_table[(q4 >> 16) & 0xf]);
+        uint8_t b3 = static_cast<uint8_t>(fallback_table[(q4 >> 24) & 0xf]);
+        return static_cast<int>(b0 | (b1 << 8) | (b2 << 16) | (b3 << 24));
+    }
+    return 0;
 #endif
 }

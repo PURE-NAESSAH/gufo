@@ -80,7 +80,7 @@ static __device__ __constant__ const float rocmfp4_scale_ue4m3_half_lut[127] = {
 #endif
 
 static __device__ __forceinline__ float rocmfp4_u32_as_f32(uint32_t bits) {
-#if defined(GGML_USE_HIP)
+#if defined(__AMDGCN__) || defined(__HIP_PLATFORM_AMD__) || defined(GGML_USE_HIP)
     return __uint_as_float(bits);
 #else
     float result;

@@ -22,6 +22,10 @@
 #include "src/models/qwen35_moe/state.hpp"
 #include "src/models/qwen35_moe/weights.hpp"
 
+#if defined(ENGINE_ENABLE_HIP)
+#include "src/models/qwen35_moe/hip/gpu_runner.hpp"
+#endif
+
 namespace gufo::models::qwen35_moe {
 
 struct ModelOptions {
@@ -135,6 +139,9 @@ private:
   ScratchArena scratch_;
   std::function<bool()> cancellation_check_;
   std::shared_ptr<const qwen::vision::Prompt> vision_prompt_;
+#if defined(ENGINE_ENABLE_HIP)
+  hip::GpuState gpu_state_;
+#endif
 };
 
 }  // namespace gufo::models::qwen35_moe
