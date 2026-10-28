@@ -63,11 +63,11 @@ void GpuState::Allocate(const Config& cfg, uint32_t max_ctx) {
   d_ssm_gate = static_cast<float*>(AllocBytes(kMaxChunk * val_dim * sizeof(float), allocations));
   d_ssm_alpha = static_cast<float*>(AllocBytes(kMaxChunk * v_heads * sizeof(float), allocations));
   d_ssm_beta = static_cast<float*>(AllocBytes(kMaxChunk * v_heads * sizeof(float), allocations));
-  d_decay = static_cast<float*>(AllocBytes(v_heads * sizeof(float), allocations));
-  d_beta_sig = static_cast<float*>(AllocBytes(v_heads * sizeof(float), allocations));
-  d_ssm_conv_out = static_cast<float*>(AllocBytes(conv_channels * sizeof(float), allocations));
-  d_ssm_q_normed = static_cast<float*>(AllocBytes(cfg.SsmKeyDim() * sizeof(float), allocations));
-  d_ssm_k_normed = static_cast<float*>(AllocBytes(cfg.SsmKeyDim() * sizeof(float), allocations));
+  d_decay = static_cast<float*>(AllocBytes(kMaxChunk * v_heads * sizeof(float), allocations));
+  d_beta_sig = static_cast<float*>(AllocBytes(kMaxChunk * v_heads * sizeof(float), allocations));
+  d_ssm_conv_out = static_cast<float*>(AllocBytes(kMaxChunk * conv_channels * sizeof(float), allocations));
+  d_ssm_q_normed = static_cast<float*>(AllocBytes(kMaxChunk * cfg.SsmKeyDim() * sizeof(float), allocations));
+  d_ssm_k_normed = static_cast<float*>(AllocBytes(kMaxChunk * cfg.SsmKeyDim() * sizeof(float), allocations));
   d_ssm_core_out = static_cast<float*>(AllocBytes(kMaxChunk * val_dim * sizeof(float), allocations));
 
   const size_t conv_elements = static_cast<size_t>(ssm_layers) * 3 * conv_channels;
@@ -592,22 +592,13 @@ void ForwardModelGpuChunk(
       float* layer_deltanet_state =
           state.d_deltanet_state + (static_cast<size_t>(ssm_layer_idx) * v_heads * ssm_head_dim * ssm_head_dim);
 
-      // Sequential recurrence on main stream (pure async GPU queue)
-      for (uint32_t t = 0; t < B; ++t) {
-        const float* t_ssm_qkv = state.d_ssm_qkv + (static_cast<size_t>(t) * conv_channels);
-        const float* t_ssm_gate = state.d_ssm_gate + (static_cast<size_t>(t) * val_dim);
-        const float* t_ssm_alpha = state.d_ssm_alpha + (static_cast<size_t>(t) * v_heads);
-        const float* t_ssm_beta = state.d_ssm_beta + (static_cast<size_t>(t) * v_heads);
-        float* t_core_out = state.d_ssm_core_out + (static_cast<size_t>(t) * val_dim);
-
-        DispatchSsmStep(
-            main, t_ssm_qkv, t_ssm_gate, t_ssm_alpha, t_ssm_beta,
-            layer.ssm_dt.data, layer.ssm_a.data, layer.ssm_conv1d.data, layer.ssm_norm.data,
-            conv_channels, v_heads, k_heads, ssm_head_dim, cfg.rms_eps,
-            layer_conv_state, layer_deltanet_state,
-            state.d_decay, state.d_beta_sig, state.d_ssm_conv_out,
-            state.d_ssm_q_normed, state.d_ssm_k_normed, t_core_out);
-      }
+      DispatchSsmChunk(
+          main, state.d_ssm_qkv, state.d_ssm_gate, state.d_ssm_alpha, state.d_ssm_beta,
+          layer.ssm_dt.data, layer.ssm_a.data, layer.ssm_conv1d.data, layer.ssm_norm.data,
+          conv_channels, v_heads, k_heads, ssm_head_dim, B, cfg.rms_eps,
+          layer_conv_state, layer_deltanet_state,
+          state.d_decay, state.d_beta_sig, state.d_ssm_conv_out,
+          state.d_ssm_q_normed, state.d_ssm_k_normed, state.d_ssm_core_out);
 
       DispatchGemm(main, layer.ssm_out.data, layer.ssm_out.type, 0, 0,
                    state.d_ssm_core_out, state.d_attn_out, H, val_dim, B);

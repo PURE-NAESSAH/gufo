@@ -104,6 +104,31 @@ void DispatchSsmStep(
     float* k_normed_scratch,
     float* core_out);
 
+void DispatchSsmChunk(
+    hipStream_t stream,
+    const float* ssm_qkv,
+    const float* ssm_gate,
+    const float* ssm_alpha,
+    const float* ssm_beta,
+    const void* dt_bias,
+    const void* a_val,
+    const void* conv1d_w,
+    const void* ssm_norm_w,
+    uint32_t conv_channels,
+    uint32_t v_heads,
+    uint32_t k_heads,
+    uint32_t head_dim,
+    uint32_t B,
+    float eps,
+    float* conv_state,
+    float* deltanet_state,
+    float* decay_buf,
+    float* beta_sig_buf,
+    float* conv_out_buf,
+    float* q_normed_buf,
+    float* k_normed_buf,
+    float* core_out);
+
 void DispatchSiluMul(
     hipStream_t stream,
     const float* gate,

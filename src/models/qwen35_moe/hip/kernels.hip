@@ -971,6 +971,265 @@ void DispatchSsmStep(
       ssm_gate, ssm_norm_w, v_heads, k_heads, head_dim, eps, deltanet_state, core_out);
 }
 
+__global__ void SsmConv1DChunkKernel(
+    const float* __restrict__ qkv_in,
+    const void* __restrict__ conv1d_w,
+    uint32_t conv_channels,
+    uint32_t B,
+    float* __restrict__ conv_state,
+    float* __restrict__ conv_out) {
+  const uint32_t c = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (c >= conv_channels) return;
+
+  float s0 = conv_state[c];
+  float s1 = conv_state[conv_channels + c];
+  float s2 = conv_state[(2 * conv_channels) + c];
+
+  const float* wc = nullptr;
+  if (conv1d_w != nullptr) {
+    wc = static_cast<const float*>(conv1d_w) + (c * 4);
+  }
+
+  for (uint32_t t = 0; t < B; ++t) {
+    const float s3 = qkv_in[(static_cast<size_t>(t) * conv_channels) + c];
+    float dot = s3;
+    if (wc != nullptr) {
+      dot = (s0 * wc[0]) + (s1 * wc[1]) + (s2 * wc[2]) + (s3 * wc[3]);
+    }
+    conv_out[(static_cast<size_t>(t) * conv_channels) + c] = Siluf(dot);
+    s0 = s1;
+    s1 = s2;
+    s2 = s3;
+  }
+
+  conv_state[c] = s0;
+  conv_state[conv_channels + c] = s1;
+  conv_state[(2 * conv_channels) + c] = s2;
+}
+
+__global__ void SsmAlphaBetaChunkKernel(
+    const float* __restrict__ alpha,
+    const float* __restrict__ beta,
+    const void* __restrict__ dt_bias,
+    const void* __restrict__ a_val,
+    uint32_t v_heads,
+    uint32_t B,
+    float* __restrict__ decay_out,
+    float* __restrict__ beta_sig_out) {
+  const uint32_t vh = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (vh >= v_heads) return;
+
+  const float dt = dt_bias ? static_cast<const float*>(dt_bias)[vh] : 0.0f;
+  const float a = a_val ? static_cast<const float*>(a_val)[vh] : 0.0f;
+
+  for (uint32_t t = 0; t < B; ++t) {
+    const size_t idx = (static_cast<size_t>(t) * v_heads) + vh;
+    beta_sig_out[idx] = Sigmoidf(beta[idx]);
+    const float alpha_biased = alpha[idx] + dt;
+    decay_out[idx] = expf(a * Softplusf(alpha_biased));
+  }
+}
+
+__global__ void SsmHeadNormChunkKernel(
+    const float* __restrict__ conv_out,
+    uint32_t conv_channels,
+    uint32_t k_heads,
+    uint32_t head_dim,
+    uint32_t B,
+    float eps,
+    float* __restrict__ q_normed,
+    float* __restrict__ k_normed) {
+  const uint32_t kh = blockIdx.x;
+  const uint32_t t = blockIdx.y;
+  const uint32_t d = threadIdx.x;
+  if (kh >= k_heads || t >= B || d >= head_dim) return;
+
+  const float* token_conv = conv_out + (static_cast<size_t>(t) * conv_channels);
+  const float* qh = token_conv + (kh * head_dim);
+  const float* kh_p = token_conv + (k_heads * head_dim) + (kh * head_dim);
+
+  float q_sq = qh[d] * qh[d];
+  float k_sq = kh_p[d] * kh_p[d];
+
+  for (int offset = 16; offset > 0; offset >>= 1) {
+    q_sq += __shfl_xor(q_sq, offset);
+    k_sq += __shfl_xor(k_sq, offset);
+  }
+
+  __shared__ float s_q[4], s_k[4];
+  const uint32_t lane = d & 31u;
+  const uint32_t warp = d >> 5u;
+  if (lane == 0) {
+    s_q[warp] = q_sq;
+    s_k[warp] = k_sq;
+  }
+  __syncthreads();
+
+  if (warp == 0) {
+    float sum_q = (lane < 4) ? s_q[lane] : 0.0f;
+    float sum_k = (lane < 4) ? s_k[lane] : 0.0f;
+    for (int offset = 2; offset > 0; offset >>= 1) {
+      sum_q += __shfl_xor(sum_q, offset);
+      sum_k += __shfl_xor(sum_k, offset);
+    }
+    if (lane == 0) {
+      s_q[0] = 1.0f / fmaxf(sqrtf(sum_q), eps);
+      s_k[0] = 1.0f / fmaxf(sqrtf(sum_k), eps);
+    }
+  }
+  __syncthreads();
+
+  const size_t out_idx = (static_cast<size_t>(t) * k_heads * head_dim) + (kh * head_dim) + d;
+  q_normed[out_idx] = qh[d] * s_q[0];
+  k_normed[out_idx] = kh_p[d] * s_k[0];
+}
+
+__global__ void SsmRecurrenceChunkKernel(
+    const float* __restrict__ q_normed,
+    const float* __restrict__ k_normed,
+    const float* __restrict__ conv_out,
+    uint32_t conv_channels,
+    const float* __restrict__ decay,
+    const float* __restrict__ beta_sig,
+    const float* __restrict__ ssm_gate,
+    const void* __restrict__ ssm_norm_w,
+    uint32_t v_heads,
+    uint32_t k_heads,
+    uint32_t head_dim,
+    uint32_t B,
+    float eps,
+    float* __restrict__ deltanet_state,
+    float* __restrict__ core_out) {
+  const uint32_t vh = blockIdx.x;
+  if (vh >= v_heads) return;
+  const uint32_t kh = vh % k_heads;
+  const uint32_t c = threadIdx.x; // 0..127
+  const uint32_t lane = c & 31u;
+  const uint32_t warp = c >> 5u;
+
+  __shared__ float s_q[128];
+  __shared__ float s_k[128];
+  __shared__ float s_core[128];
+  __shared__ float s_sq_warp[4];
+
+  float* S_col = deltanet_state + (static_cast<size_t>(vh) * head_dim * head_dim) + c;
+  const size_t v_offset = (2 * k_heads * head_dim) + (vh * head_dim);
+  const float nw = ssm_norm_w ? static_cast<const float*>(ssm_norm_w)[c] : 1.0f;
+  constexpr float scale = 0.08838834764831845f; // 1.0f / sqrtf(128.0f)
+
+  for (uint32_t t = 0; t < B; ++t) {
+    const size_t qk_base = (static_cast<size_t>(t) * k_heads * head_dim) + (kh * head_dim);
+    s_q[c] = q_normed[qk_base + c];
+    s_k[c] = k_normed[qk_base + c];
+    __syncthreads();
+
+    // Step 1: kv_col = (S^T @ k)[c] = sum_r S[r, c] * k[r]
+    float kv_col = 0.0f;
+    #pragma unroll
+    for (uint32_t r = 0; r < 128; ++r) {
+      kv_col += S_col[r * 128] * s_k[r];
+    }
+
+    const size_t t_vh_idx = (static_cast<size_t>(t) * v_heads) + vh;
+    const float d_val = decay[t_vh_idx];
+    const float b_val = beta_sig[t_vh_idx];
+    const float v_val = conv_out[(static_cast<size_t>(t) * conv_channels) + v_offset + c];
+
+    // Step 2: delta_col = (v[c] - decay * kv_col) * beta
+    const float delta_col = (v_val - (d_val * kv_col)) * b_val;
+
+    // Step 3: S[r, c] = decay * S[r, c] + delta_col * k[r], and readout = sum_r S[r, c] * q[r]
+    float readout = 0.0f;
+    #pragma unroll
+    for (uint32_t r = 0; r < 128; ++r) {
+      float* entry = S_col + (r * 128);
+      const float updated = (*entry * d_val) + (s_k[r] * delta_col);
+      *entry = updated;
+      readout += updated * s_q[r];
+    }
+
+    // Step 4: RMSNorm & Gate
+    s_core[c] = readout * scale;
+    __syncthreads();
+
+    float sq = s_core[c] * s_core[c];
+    for (int offset = 16; offset > 0; offset >>= 1) {
+      sq += __shfl_xor(sq, offset);
+    }
+    if (lane == 0) {
+      s_sq_warp[warp] = sq;
+    }
+    __syncthreads();
+
+    if (warp == 0) {
+      float tot_sq = (lane < 4) ? s_sq_warp[lane] : 0.0f;
+      for (int offset = 2; offset > 0; offset >>= 1) {
+        tot_sq += __shfl_xor(tot_sq, offset);
+      }
+      if (lane == 0) {
+        s_sq_warp[0] = rsqrtf((tot_sq / 128.0f) + eps);
+      }
+    }
+    __syncthreads();
+
+    const float norm_scale = s_sq_warp[0];
+    const float normed_val = s_core[c] * norm_scale * nw;
+    const size_t out_idx = (static_cast<size_t>(t) * v_heads * head_dim) + (vh * head_dim) + c;
+    const float z_val = ssm_gate[out_idx];
+
+    core_out[out_idx] = normed_val * Siluf(z_val);
+    __syncthreads();
+  }
+}
+
+void DispatchSsmChunk(
+    hipStream_t stream,
+    const float* ssm_qkv,
+    const float* ssm_gate,
+    const float* ssm_alpha,
+    const float* ssm_beta,
+    const void* dt_bias,
+    const void* a_val,
+    const void* conv1d_w,
+    const void* ssm_norm_w,
+    uint32_t conv_channels,
+    uint32_t v_heads,
+    uint32_t k_heads,
+    uint32_t head_dim,
+    uint32_t B,
+    float eps,
+    float* conv_state,
+    float* deltanet_state,
+    float* decay_buf,
+    float* beta_sig_buf,
+    float* conv_out_buf,
+    float* q_normed_buf,
+    float* k_normed_buf,
+    float* core_out) {
+  // 1. Batched Conv1D for all B tokens
+  const uint32_t conv_block = 256;
+  const uint32_t conv_grid = (conv_channels + conv_block - 1) / conv_block;
+  SsmConv1DChunkKernel<<<conv_grid, conv_block, 0, stream>>>(
+      ssm_qkv, conv1d_w, conv_channels, B, conv_state, conv_out_buf);
+
+  // 2. Batched AlphaBeta for all B tokens
+  const uint32_t ab_block = 64;
+  const uint32_t ab_grid = (v_heads + ab_block - 1) / ab_block;
+  SsmAlphaBetaChunkKernel<<<ab_grid, ab_block, 0, stream>>>(
+      ssm_alpha, ssm_beta, dt_bias, a_val, v_heads, B, decay_buf, beta_sig_buf);
+
+  // 3. Batched HeadNorm for all B tokens
+  const dim3 norm_grid(k_heads, B);
+  SsmHeadNormChunkKernel<<<norm_grid, head_dim, 0, stream>>>(
+      conv_out_buf, conv_channels, k_heads, head_dim, B, eps, q_normed_buf, k_normed_buf);
+
+  // 4. Batched Recurrence for all B tokens in one kernel
+  SsmRecurrenceChunkKernel<<<v_heads, head_dim, 0, stream>>>(
+      q_normed_buf, k_normed_buf, conv_out_buf, conv_channels,
+      decay_buf, beta_sig_buf, ssm_gate, ssm_norm_w,
+      v_heads, k_heads, head_dim, B, eps, deltanet_state, core_out);
+}
+
 // ---------------------------------------------------------------------------
 // 9. MoE Elementwise & Routing Kernels
 // ---------------------------------------------------------------------------
@@ -1047,7 +1306,7 @@ void DispatchResidualAdd(hipStream_t stream, const float* delta, uint32_t size, 
 // ---------------------------------------------------------------------------
 
 template <uint32_t WavesPerBlock>
-__launch_bounds__(WavesPerBlock * 32, 4)
+__launch_bounds__(WavesPerBlock * 32)
 __global__ void GemmTileRocmFp4FastKernel(
     const void* __restrict__ A_data,
     const float* __restrict__ x,
@@ -1098,7 +1357,7 @@ __global__ void GemmTileRocmFp4FastKernel(
 }
 
 template <uint32_t WavesPerBlock>
-__launch_bounds__(WavesPerBlock * 32, 4)
+__launch_bounds__(WavesPerBlock * 32)
 __global__ void GemmTileRocmFp4Kernel(
     const void* __restrict__ A_data,
     const float* __restrict__ x,
@@ -1276,7 +1535,7 @@ __global__ void GemmTileQ8_0Kernel(
 }
 
 template <uint32_t WavesPerBlock, uint32_t T_BATCH = 32>
-__launch_bounds__(WavesPerBlock * 32, 4)
+__launch_bounds__(WavesPerBlock * 32)
 __global__ void GemmLdsRocmFp4FastKernel(
     const void* __restrict__ A_data,
     const float* __restrict__ x,
@@ -1358,7 +1617,7 @@ __global__ void GemmLdsRocmFp4FastKernel(
 }
 
 template <uint32_t WavesPerBlock, uint32_t T_BATCH = 32>
-__launch_bounds__(WavesPerBlock * 32, 4)
+__launch_bounds__(WavesPerBlock * 32)
 __global__ void GemmLdsRocmFp4Kernel(
     const void* __restrict__ A_data,
     const float* __restrict__ x,
@@ -1915,7 +2174,7 @@ void DispatchMoECombineSharedBatch(
 // ---------------------------------------------------------------------------
 
 template <uint32_t WavesPerBlock>
-__launch_bounds__(WavesPerBlock * 32, 4)
+__launch_bounds__(WavesPerBlock * 32)
 __global__ void MoeGatedSwigluFastKernel(
     const void* __restrict__ gate_data,
     const void* __restrict__ up_data,
@@ -2000,7 +2259,7 @@ __global__ void MoeGatedSwigluFastKernel(
 }
 
 template <uint32_t WavesPerBlock>
-__launch_bounds__(WavesPerBlock * 32, 4)
+__launch_bounds__(WavesPerBlock * 32)
 __global__ void MoeDownAccumFastKernel(
     const void* __restrict__ down_data,
     uint64_t expert_stride_down,
