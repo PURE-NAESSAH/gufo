@@ -3119,6 +3119,11 @@ public:
     moe.set_position(moe.position() + 1);
   }
 
+  [[nodiscard]] std::size_t CheckpointPosition(
+      const TextRunnerState& state) const override {
+    return dynamic_cast<const Qwen35MoeTextRunnerState&>(state).position();
+  }
+
 private:
   std::shared_ptr<models::qwen35_moe::Model> model_;
   std::uint32_t max_context_{4096};

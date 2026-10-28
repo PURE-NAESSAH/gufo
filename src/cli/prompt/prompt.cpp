@@ -777,13 +777,14 @@ int GenerateQwen35MoeResponse(const PromptOptions& opt,
     return 1;
   }
   std::string error;
-  if (!session.Sync(prompt, &error)) {
+  const std::span<const std::int32_t> prompt_i32(
+      reinterpret_cast<const std::int32_t*>(prompt.data()), prompt.size());
+  if (!session.Sync(prompt_i32, &error)) {
     std::cerr << "Qwen 3.5 MoE prefill failed: " << error << '\n';
     return 1;
   }
   sampling::SamplerState sampler(opt.sampling, prompt);
   std::vector<tokenization::TokenId> generated;
-  const auto stats_before = session.Statistics();
   const auto start = std::chrono::steady_clock::now();
   while (generated.size() < opt.max_tokens) {
     models::qwen35_moe::Session::DecodeResult decoded;
@@ -809,13 +810,6 @@ int GenerateQwen35MoeResponse(const PromptOptions& opt,
             .count();
     std::cerr << "Generated " << generated.size() << " tokens ("
               << generated.size() / seconds << " tok/s)\n";
-    const auto& stats = session.Statistics();
-    if (stats.cycles != stats_before.cycles) {
-      std::cerr << "[Speculative]: cycles="
-                << stats.cycles - stats_before.cycles
-                << " drafted=" << stats.drafted - stats_before.drafted
-                << " accepted=" << stats.accepted - stats_before.accepted << '\n';
-    }
     PrintTokenTrace(generated);
   }
   return 0;

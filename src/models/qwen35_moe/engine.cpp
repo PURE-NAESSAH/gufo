@@ -40,7 +40,7 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
 #if defined(ENGINE_ENABLE_HIP)
     try {
       model->vision_ = qwen::vision::Encoder::Open(
-          model_path, options.vision_model_path, model->config_.embedding_length);
+          model_path, options.vision_model_path, model->config_.hidden_size);
     } catch (const std::exception& e) {
       if (error_msg != nullptr) {
         *error_msg = e.what();
@@ -276,10 +276,6 @@ bool Session::DecodeStep(std::size_t max_tokens,
   }
 
   return true;
-}
-
-void Session::ConfigureVision(std::shared_ptr<const qwen::vision::Prompt> prompt) {
-  vision_prompt_ = std::move(prompt);
 }
 
 }  // namespace gufo::models::qwen35_moe

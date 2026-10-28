@@ -119,9 +119,10 @@ if (ENGINE_ENABLE_HIP)
     set(CMAKE_HIP_COMPILE_OPTIONS_MSVC_DEBUG_INFORMATION_FORMAT_Embedded        -Z7)
     set(CMAKE_HIP_COMPILE_OPTIONS_MSVC_DEBUG_INFORMATION_FORMAT_ProgramDatabase -Zi)
     # CMake's Windows-Clang-HIP.cmake adds -TP (force C++) which breaks HIP kernel compilation on clang-cl.
-    string(REPLACE " -TP" "" CMAKE_HIP_COMPILE_OBJECT "${CMAKE_HIP_COMPILE_OBJECT}")
-    string(REPLACE "-TP " "" CMAKE_HIP_COMPILE_OBJECT "${CMAKE_HIP_COMPILE_OBJECT}")
-    string(REPLACE "-TP" "" CMAKE_HIP_COMPILE_OBJECT "${CMAKE_HIP_COMPILE_OBJECT}")
+    # Replace it with -x hip so clang-cl compiles all HIP targets (including .hip.cpp sources) as HIP.
+    string(REPLACE " -TP" " -x hip" CMAKE_HIP_COMPILE_OBJECT "${CMAKE_HIP_COMPILE_OBJECT}")
+    string(REPLACE "-TP " "-x hip " CMAKE_HIP_COMPILE_OBJECT "${CMAKE_HIP_COMPILE_OBJECT}")
+    string(REPLACE "-TP" "-x hip" CMAKE_HIP_COMPILE_OBJECT "${CMAKE_HIP_COMPILE_OBJECT}")
   endif()
   # clang-cl compiles HIP like C++ on Windows, so ccache covers it there.
   if (GUFO_CCACHE_CLANG_CL)
