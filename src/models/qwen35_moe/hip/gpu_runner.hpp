@@ -73,6 +73,15 @@ struct GpuState {
   float* d_shexp_dot{nullptr};
   float* d_moe_out{nullptr};
 
+  // MoE Grouped GEMM Buffers
+  uint32_t* d_expert_counts{nullptr};
+  uint32_t* d_expert_offsets{nullptr};
+  uint32_t* d_expert_cursors{nullptr};
+  uint32_t* d_sorted_slots{nullptr};
+  uint32_t* d_tok_tile_expert{nullptr};
+  uint32_t* d_tok_tile_offset{nullptr};
+  uint32_t* d_num_tiles{nullptr};
+
   // Logits
   float* d_logits{nullptr};
 

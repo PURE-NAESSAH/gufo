@@ -61,7 +61,7 @@ __device__ __forceinline__ float DecodeQ6_K(const quant::block_q6_K& block, uint
 // ---------------------------------------------------------------------------
 
 template <uint32_t WavesPerBlock>
-__launch_bounds__(WavesPerBlock * 32, 4)
+__launch_bounds__(WavesPerBlock * 32)
 __global__ void GemvRocmFp4FastKernel(
     const void* __restrict__ A_data,
     const float* __restrict__ x,
@@ -110,7 +110,7 @@ __global__ void GemvRocmFp4FastKernel(
 }
 
 template <uint32_t WavesPerBlock>
-__launch_bounds__(WavesPerBlock * 32, 4)
+__launch_bounds__(WavesPerBlock * 32)
 __global__ void GemvRocmFp4Kernel(
     const void* __restrict__ A_data,
     const float* __restrict__ x,
@@ -160,7 +160,7 @@ __global__ void GemvRocmFp4Kernel(
 }
 
 template <uint32_t WavesPerBlock>
-__launch_bounds__(WavesPerBlock * 32, 4)
+__launch_bounds__(WavesPerBlock * 32)
 __global__ void GemvBF16Kernel(
     const void* __restrict__ A_data,
     const float* __restrict__ x,
@@ -198,7 +198,7 @@ __global__ void GemvBF16Kernel(
 }
 
 template <uint32_t WavesPerBlock>
-__launch_bounds__(WavesPerBlock * 32, 4)
+__launch_bounds__(WavesPerBlock * 32)
 __global__ void GemvF32Kernel(
     const void* __restrict__ A_data,
     const float* __restrict__ x,
@@ -233,7 +233,7 @@ __global__ void GemvF32Kernel(
 }
 
 template <uint32_t WavesPerBlock>
-__launch_bounds__(WavesPerBlock * 32, 4)
+__launch_bounds__(WavesPerBlock * 32)
 __global__ void GemvF16Kernel(
     const void* __restrict__ A_data,
     const float* __restrict__ x,
@@ -269,7 +269,7 @@ __global__ void GemvF16Kernel(
 }
 
 template <uint32_t WavesPerBlock>
-__launch_bounds__(WavesPerBlock * 32, 4)
+__launch_bounds__(WavesPerBlock * 32)
 __global__ void GemvQ8_0Kernel(
     const void* __restrict__ A_data,
     const float* __restrict__ x,
@@ -1409,7 +1409,7 @@ __global__ void GemmTileRocmFp4Kernel(
 }
 
 template <uint32_t WavesPerBlock>
-__launch_bounds__(WavesPerBlock * 32, 4)
+__launch_bounds__(WavesPerBlock * 32)
 __global__ void GemmTileBF16Kernel(
     const void* __restrict__ A_data,
     const float* __restrict__ x,
@@ -1448,7 +1448,7 @@ __global__ void GemmTileBF16Kernel(
 }
 
 template <uint32_t WavesPerBlock>
-__launch_bounds__(WavesPerBlock * 32, 4)
+__launch_bounds__(WavesPerBlock * 32)
 __global__ void GemmTileF16Kernel(
     const void* __restrict__ A_data,
     const float* __restrict__ x,
@@ -1487,7 +1487,7 @@ __global__ void GemmTileF16Kernel(
 }
 
 template <uint32_t WavesPerBlock>
-__launch_bounds__(WavesPerBlock * 32, 4)
+__launch_bounds__(WavesPerBlock * 32)
 __global__ void GemmTileQ8_0Kernel(
     const void* __restrict__ A_data,
     const float* __restrict__ x,
@@ -2373,6 +2373,380 @@ void DispatchMoeDownAccumBatch(
   MoeDownAccumFastKernel<kWaves><<<grid_dim, block_dim, 0, stream>>>(
       down_data, expert_stride_down, act_in, expert_weights, expert_ids,
       B, num_experts_used, expert_ff, H, routed_accum);
+}
+
+__global__ void MoeCountExpertsKernel(
+    const uint32_t* __restrict__ expert_ids,
+    uint32_t* __restrict__ counts,
+    uint32_t total_slots) {
+  const uint32_t slot = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (slot < total_slots) {
+    const uint32_t e = expert_ids[slot];
+    atomicAdd(&counts[e], 1u);
+  }
+}
+
+__global__ void MoePrefixSumOffsetsKernel(
+    const uint32_t* __restrict__ counts,
+    uint32_t* __restrict__ offsets,
+    uint32_t num_experts) {
+  const uint32_t tid = threadIdx.x;
+  if (tid == 0) {
+    uint32_t sum = 0;
+    for (uint32_t e = 0; e < num_experts; ++e) {
+      offsets[e] = sum;
+      sum += counts[e];
+    }
+    offsets[num_experts] = sum;
+  }
+}
+
+__global__ void MoeScatterSlotsKernel(
+    const uint32_t* __restrict__ expert_ids,
+    const uint32_t* __restrict__ offsets,
+    uint32_t* __restrict__ cursors,
+    uint32_t* __restrict__ sorted_slots,
+    uint32_t total_slots) {
+  const uint32_t slot = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (slot < total_slots) {
+    const uint32_t e = expert_ids[slot];
+    const uint32_t pos = offsets[e] + atomicAdd(&cursors[e], 1u);
+    sorted_slots[pos] = slot;
+  }
+}
+
+__global__ void MoeBuildTilesKernel(
+    const uint32_t* __restrict__ counts,
+    uint32_t* __restrict__ tile_expert,
+    uint32_t* __restrict__ tile_tok_offset,
+    uint32_t* __restrict__ num_tiles_out,
+    uint32_t num_experts) {
+  const uint32_t tid = threadIdx.x;
+  if (tid == 0) {
+    uint32_t tile_idx = 0;
+    for (uint32_t e = 0; e < num_experts; ++e) {
+      const uint32_t c = counts[e];
+      for (uint32_t tok = 0; tok < c; tok += 16) {
+        tile_expert[tile_idx] = e;
+        tile_tok_offset[tile_idx] = tok;
+        tile_idx++;
+      }
+    }
+    *num_tiles_out = tile_idx;
+  }
+}
+
+void DispatchSortMoESlots(
+    hipStream_t stream,
+    const uint32_t* expert_ids,
+    uint32_t total_slots,
+    uint32_t num_experts,
+    uint32_t* counts,
+    uint32_t* offsets,
+    uint32_t* cursors,
+    uint32_t* sorted_slots,
+    uint32_t* tile_expert,
+    uint32_t* tile_tok_offset,
+    uint32_t* num_tiles_out) {
+  (void)hipMemsetAsync(counts, 0, num_experts * sizeof(uint32_t), stream);
+  (void)hipMemsetAsync(cursors, 0, num_experts * sizeof(uint32_t), stream);
+
+  const uint32_t block_dim = 256;
+  const uint32_t grid_dim = (total_slots + block_dim - 1) / block_dim;
+
+  MoeCountExpertsKernel<<<grid_dim, block_dim, 0, stream>>>(expert_ids, counts, total_slots);
+  MoePrefixSumOffsetsKernel<<<1, 32, 0, stream>>>(counts, offsets, num_experts);
+  MoeScatterSlotsKernel<<<grid_dim, block_dim, 0, stream>>>(expert_ids, offsets, cursors, sorted_slots, total_slots);
+  MoeBuildTilesKernel<<<1, 32, 0, stream>>>(counts, tile_expert, tile_tok_offset, num_tiles_out, num_experts);
+}
+
+template <uint32_t WavesPerBlock = 8, uint32_t T_BATCH = 16>
+__launch_bounds__(WavesPerBlock * 32)
+__global__ void MoeGatedSwigluFastGroupedKernel(
+    const void* __restrict__ gate_data,
+    const void* __restrict__ up_data,
+    uint64_t expert_stride_gate,
+    uint64_t expert_stride_up,
+    const float* __restrict__ x,
+    const uint32_t* __restrict__ counts,
+    const uint32_t* __restrict__ offsets,
+    const uint32_t* __restrict__ sorted_slots,
+    const uint32_t* __restrict__ tile_expert,
+    const uint32_t* __restrict__ tile_tok_offset,
+    const uint32_t* __restrict__ num_tiles_out,
+    uint32_t B,
+    uint32_t num_experts,
+    uint32_t num_experts_used,
+    uint32_t expert_ff,
+    uint32_t H,
+    float* __restrict__ act_out) {
+  const uint32_t tile_id = blockIdx.y;
+  if (tile_id >= *num_tiles_out) return;
+
+  const uint32_t expert_id = tile_expert[tile_id];
+  const uint32_t tok_offset = tile_tok_offset[tile_id];
+  const uint32_t count = counts[expert_id];
+  if (tok_offset >= count) return;
+  const uint32_t cur_batch = min(T_BATCH, count - tok_offset);
+  const uint32_t base_offset = offsets[expert_id];
+
+  const uint32_t tid = threadIdx.x;
+  const uint32_t lane_id = tid & 31u;
+  const uint32_t warp_id = tid >> 5u;
+  const uint32_t m = (blockIdx.x * WavesPerBlock) + warp_id;
+
+  const uint32_t num_blocks = H / 32;
+  const size_t row_bytes = num_blocks * sizeof(quant::block_rocmfp4_fast);
+  const uint8_t* expert_gate_base = static_cast<const uint8_t*>(gate_data) +
+                                    (static_cast<size_t>(expert_id) * expert_stride_gate);
+  const uint8_t* expert_up_base = static_cast<const uint8_t*>(up_data) +
+                                  (static_cast<size_t>(expert_id) * expert_stride_up);
+
+  const uint8_t* gate_row = (m < expert_ff) ? (expert_gate_base + (static_cast<size_t>(m) * row_bytes)) : nullptr;
+  const uint8_t* up_row = (m < expert_ff) ? (expert_up_base + (static_cast<size_t>(m) * row_bytes)) : nullptr;
+  const auto* gate_blocks = reinterpret_cast<const quant::block_rocmfp4_fast*>(gate_row);
+  const auto* up_blocks = reinterpret_cast<const quant::block_rocmfp4_fast*>(up_row);
+
+  __shared__ float s_x[T_BATCH][64];
+
+  float sum_gate[T_BATCH] = {0.0f};
+  float sum_up[T_BATCH] = {0.0f};
+
+  const uint32_t half = lane_id >= 16 ? 1 : 0;
+  const uint32_t j = lane_id & 15u;
+
+  for (uint32_t b2 = 0; b2 < num_blocks; b2 += 2) {
+    constexpr uint32_t total_floats = T_BATCH * 64;
+    for (uint32_t idx = tid; idx < total_floats; idx += blockDim.x) {
+      const uint32_t tb = idx >> 6u;
+      const uint32_t k_idx = idx & 63u;
+      if (tb < cur_batch && ((b2 * 32) + k_idx) < H) {
+        const uint32_t slot = sorted_slots[base_offset + tok_offset + tb];
+        const uint32_t t = slot / num_experts_used;
+        s_x[tb][k_idx] = x[(static_cast<size_t>(t) * H) + (b2 * 32) + k_idx];
+      } else {
+        s_x[tb][k_idx] = 0.0f;
+      }
+    }
+    __syncthreads();
+
+    if (m < expert_ff) {
+      const uint32_t b = b2 + half;
+      if (b < num_blocks) {
+        const auto& g_blk = gate_blocks[b];
+        const float g_scale = rocmfp4_ue4m3_to_fp32_half_finite(g_blk.e);
+        const uint8_t g_byte = g_blk.qs[j];
+        const float gw0 = static_cast<float>(Rocmfp4DecodeNibble(g_byte & 0x0Fu)) * g_scale;
+        const float gw1 = static_cast<float>(Rocmfp4DecodeNibble(g_byte >> 4u)) * g_scale;
+
+        const auto& u_blk = up_blocks[b];
+        const float u_scale = rocmfp4_ue4m3_to_fp32_half_finite(u_blk.e);
+        const uint8_t u_byte = u_blk.qs[j];
+        const float uw0 = static_cast<float>(Rocmfp4DecodeNibble(u_byte & 0x0Fu)) * u_scale;
+        const float uw1 = static_cast<float>(Rocmfp4DecodeNibble(u_byte >> 4u)) * u_scale;
+
+        const uint32_t offset_k = half * 32;
+        #pragma unroll
+        for (uint32_t tb = 0; tb < T_BATCH; ++tb) {
+          const float x0 = s_x[tb][offset_k + j];
+          const float x1 = s_x[tb][offset_k + j + 16];
+          sum_gate[tb] += (gw0 * x0) + (gw1 * x1);
+          sum_up[tb] += (uw0 * x0) + (uw1 * x1);
+        }
+      }
+    }
+    __syncthreads();
+  }
+
+  if (m < expert_ff) {
+    #pragma unroll
+    for (uint32_t tb = 0; tb < T_BATCH; ++tb) {
+      if (tb < cur_batch) {
+        float sg = sum_gate[tb];
+        float su = sum_up[tb];
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset >>= 1) {
+          sg += __shfl_xor(sg, offset);
+          su += __shfl_xor(su, offset);
+        }
+        if (lane_id == 0) {
+          const uint32_t slot = sorted_slots[base_offset + tok_offset + tb];
+          const float silu_gate = sg / (1.0f + __expf(-sg));
+          act_out[(static_cast<size_t>(slot) * expert_ff) + m] = silu_gate * su;
+        }
+      }
+    }
+  }
+}
+
+template <uint32_t WavesPerBlock = 8, uint32_t T_BATCH = 16>
+__launch_bounds__(WavesPerBlock * 32)
+__global__ void MoeDownAccumFastGroupedKernel(
+    const void* __restrict__ down_data,
+    uint64_t expert_stride_down,
+    const float* __restrict__ act_in,
+    const float* __restrict__ expert_weights,
+    const uint32_t* __restrict__ counts,
+    const uint32_t* __restrict__ offsets,
+    const uint32_t* __restrict__ sorted_slots,
+    const uint32_t* __restrict__ tile_expert,
+    const uint32_t* __restrict__ tile_tok_offset,
+    const uint32_t* __restrict__ num_tiles_out,
+    uint32_t B,
+    uint32_t num_experts,
+    uint32_t num_experts_used,
+    uint32_t expert_ff,
+    uint32_t H,
+    float* __restrict__ routed_accum) {
+  const uint32_t tile_id = blockIdx.y;
+  if (tile_id >= *num_tiles_out) return;
+
+  const uint32_t expert_id = tile_expert[tile_id];
+  const uint32_t tok_offset = tile_tok_offset[tile_id];
+  const uint32_t count = counts[expert_id];
+  if (tok_offset >= count) return;
+  const uint32_t cur_batch = min(T_BATCH, count - tok_offset);
+  const uint32_t base_offset = offsets[expert_id];
+
+  const uint32_t tid = threadIdx.x;
+  const uint32_t lane_id = tid & 31u;
+  const uint32_t warp_id = tid >> 5u;
+  const uint32_t m = (blockIdx.x * WavesPerBlock) + warp_id;
+
+  const uint32_t num_blocks = expert_ff / 32;
+  const size_t row_bytes = num_blocks * sizeof(quant::block_rocmfp4_fast);
+  const uint8_t* expert_down_base = static_cast<const uint8_t*>(down_data) +
+                                    (static_cast<size_t>(expert_id) * expert_stride_down);
+  const uint8_t* row_base = (m < H) ? (expert_down_base + (static_cast<size_t>(m) * row_bytes)) : nullptr;
+  const auto* blocks = reinterpret_cast<const quant::block_rocmfp4_fast*>(row_base);
+
+  __shared__ float s_act[T_BATCH][64];
+
+  float sum[T_BATCH] = {0.0f};
+
+  const uint32_t half = lane_id >= 16 ? 1 : 0;
+  const uint32_t j = lane_id & 15u;
+
+  for (uint32_t b2 = 0; b2 < num_blocks; b2 += 2) {
+    constexpr uint32_t total_floats = T_BATCH * 64;
+    for (uint32_t idx = tid; idx < total_floats; idx += blockDim.x) {
+      const uint32_t tb = idx >> 6u;
+      const uint32_t k_idx = idx & 63u;
+      if (tb < cur_batch && ((b2 * 32) + k_idx) < expert_ff) {
+        const uint32_t slot = sorted_slots[base_offset + tok_offset + tb];
+        s_act[tb][k_idx] = act_in[(static_cast<size_t>(slot) * expert_ff) + (b2 * 32) + k_idx];
+      } else {
+        s_act[tb][k_idx] = 0.0f;
+      }
+    }
+    __syncthreads();
+
+    if (m < H) {
+      const uint32_t b = b2 + half;
+      if (b < num_blocks) {
+        const auto& blk = blocks[b];
+        const float scale = rocmfp4_ue4m3_to_fp32_half_finite(blk.e);
+        const uint8_t byte_val = blk.qs[j];
+        const float w0 = static_cast<float>(Rocmfp4DecodeNibble(byte_val & 0x0Fu)) * scale;
+        const float w1 = static_cast<float>(Rocmfp4DecodeNibble(byte_val >> 4u)) * scale;
+
+        const uint32_t offset_k = half * 32;
+        #pragma unroll
+        for (uint32_t tb = 0; tb < T_BATCH; ++tb) {
+          sum[tb] += (w0 * s_act[tb][offset_k + j]) + (w1 * s_act[tb][offset_k + j + 16]);
+        }
+      }
+    }
+    __syncthreads();
+  }
+
+  if (m < H) {
+    #pragma unroll
+    for (uint32_t tb = 0; tb < T_BATCH; ++tb) {
+      if (tb < cur_batch) {
+        float s = sum[tb];
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset >>= 1) {
+          s += __shfl_xor(s, offset);
+        }
+        if (lane_id == 0) {
+          const uint32_t slot = sorted_slots[base_offset + tok_offset + tb];
+          const float weight = expert_weights[slot];
+          if (weight != 0.0f) {
+            const uint32_t t = slot / num_experts_used;
+            atomicAdd(&routed_accum[(static_cast<size_t>(t) * H) + m], s * weight);
+          }
+        }
+      }
+    }
+  }
+}
+
+void DispatchMoeGatedSwigluGrouped(
+    hipStream_t stream,
+    const void* gate_data,
+    const void* up_data,
+    core::GgmlType exp_type,
+    uint64_t expert_stride_gate,
+    uint64_t expert_stride_up,
+    const float* x,
+    const uint32_t* counts,
+    const uint32_t* offsets,
+    const uint32_t* sorted_slots,
+    const uint32_t* tile_expert,
+    const uint32_t* tile_tok_offset,
+    const uint32_t* num_tiles_out,
+    uint32_t B,
+    uint32_t num_experts,
+    uint32_t num_experts_used,
+    uint32_t expert_ff,
+    uint32_t H,
+    float* act_out) {
+  (void)exp_type;
+  constexpr uint32_t kWaves = 8;
+  constexpr uint32_t T_BATCH = 16;
+  const dim3 block_dim(kWaves * 32);
+  const uint32_t max_tiles = std::min(8192u, (B * num_experts_used + T_BATCH - 1u) / T_BATCH + num_experts);
+  const dim3 grid_dim((expert_ff + kWaves - 1) / kWaves, max_tiles);
+
+  MoeGatedSwigluFastGroupedKernel<kWaves, T_BATCH><<<grid_dim, block_dim, 0, stream>>>(
+      gate_data, up_data, expert_stride_gate, expert_stride_up,
+      x, counts, offsets, sorted_slots,
+      tile_expert, tile_tok_offset, num_tiles_out,
+      B, num_experts, num_experts_used, expert_ff, H, act_out);
+}
+
+void DispatchMoeDownAccumGrouped(
+    hipStream_t stream,
+    const void* down_data,
+    core::GgmlType exp_type,
+    uint64_t expert_stride_down,
+    const float* act_in,
+    const float* expert_weights,
+    const uint32_t* counts,
+    const uint32_t* offsets,
+    const uint32_t* sorted_slots,
+    const uint32_t* tile_expert,
+    const uint32_t* tile_tok_offset,
+    const uint32_t* num_tiles_out,
+    uint32_t B,
+    uint32_t num_experts,
+    uint32_t num_experts_used,
+    uint32_t expert_ff,
+    uint32_t H,
+    float* routed_accum) {
+  (void)exp_type;
+  constexpr uint32_t kWaves = 8;
+  constexpr uint32_t T_BATCH = 16;
+  const dim3 block_dim(kWaves * 32);
+  const uint32_t max_tiles = std::min(8192u, (B * num_experts_used + T_BATCH - 1u) / T_BATCH + num_experts);
+  const dim3 grid_dim((H + kWaves - 1) / kWaves, max_tiles);
+
+  MoeDownAccumFastGroupedKernel<kWaves, T_BATCH><<<grid_dim, block_dim, 0, stream>>>(
+      down_data, expert_stride_down, act_in, expert_weights,
+      counts, offsets, sorted_slots,
+      tile_expert, tile_tok_offset, num_tiles_out,
+      B, num_experts, num_experts_used, expert_ff, H, routed_accum);
 }
 
 __device__ __forceinline__ void WarpReduceMaxIdx(float& val, uint32_t& idx) {

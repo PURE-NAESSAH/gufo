@@ -282,6 +282,60 @@ void DispatchRouterSoftmaxTopK(
     uint32_t* expert_ids,
     float* expert_weights);
 
+void DispatchSortMoESlots(
+    hipStream_t stream,
+    const uint32_t* expert_ids,
+    uint32_t total_slots,
+    uint32_t num_experts,
+    uint32_t* counts,
+    uint32_t* offsets,
+    uint32_t* cursors,
+    uint32_t* sorted_slots,
+    uint32_t* tile_expert,
+    uint32_t* tile_tok_offset,
+    uint32_t* num_tiles_out);
+
+void DispatchMoeGatedSwigluGrouped(
+    hipStream_t stream,
+    const void* gate_data,
+    const void* up_data,
+    core::GgmlType exp_type,
+    uint64_t expert_stride_gate,
+    uint64_t expert_stride_up,
+    const float* x,
+    const uint32_t* counts,
+    const uint32_t* offsets,
+    const uint32_t* sorted_slots,
+    const uint32_t* tile_expert,
+    const uint32_t* tile_tok_offset,
+    const uint32_t* num_tiles_out,
+    uint32_t B,
+    uint32_t num_experts,
+    uint32_t num_experts_used,
+    uint32_t expert_ff,
+    uint32_t H,
+    float* act_out);
+
+void DispatchMoeDownAccumGrouped(
+    hipStream_t stream,
+    const void* down_data,
+    core::GgmlType exp_type,
+    uint64_t expert_stride_down,
+    const float* act_in,
+    const float* expert_weights,
+    const uint32_t* counts,
+    const uint32_t* offsets,
+    const uint32_t* sorted_slots,
+    const uint32_t* tile_expert,
+    const uint32_t* tile_tok_offset,
+    const uint32_t* num_tiles_out,
+    uint32_t B,
+    uint32_t num_experts,
+    uint32_t num_experts_used,
+    uint32_t expert_ff,
+    uint32_t H,
+    float* routed_accum);
+
 }  // namespace gufo::models::qwen35_moe::hip
 
 #endif  // defined(ENGINE_ENABLE_HIP)

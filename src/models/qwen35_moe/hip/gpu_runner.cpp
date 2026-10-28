@@ -85,6 +85,13 @@ void GpuState::Allocate(const Config& cfg, uint32_t max_ctx) {
   d_routed_accum = static_cast<float*>(AllocBytes(kMaxChunk * H * sizeof(float), allocations));
   d_expert_ids = static_cast<uint32_t*>(AllocBytes(kMaxChunk * cfg.num_experts_used * sizeof(uint32_t), allocations));
   d_expert_weights = static_cast<float*>(AllocBytes(kMaxChunk * cfg.num_experts_used * sizeof(float), allocations));
+  d_expert_counts = static_cast<uint32_t*>(AllocBytes(cfg.num_experts * sizeof(uint32_t), allocations));
+  d_expert_offsets = static_cast<uint32_t*>(AllocBytes((cfg.num_experts + 1) * sizeof(uint32_t), allocations));
+  d_expert_cursors = static_cast<uint32_t*>(AllocBytes(cfg.num_experts * sizeof(uint32_t), allocations));
+  d_sorted_slots = static_cast<uint32_t*>(AllocBytes(kMaxChunk * cfg.num_experts_used * sizeof(uint32_t), allocations));
+  d_tok_tile_expert = static_cast<uint32_t*>(AllocBytes(8192 * sizeof(uint32_t), allocations));
+  d_tok_tile_offset = static_cast<uint32_t*>(AllocBytes(8192 * sizeof(uint32_t), allocations));
+  d_num_tiles = static_cast<uint32_t*>(AllocBytes(sizeof(uint32_t), allocations));
   d_shexp_gate = static_cast<float*>(AllocBytes(kMaxChunk * shared_expert_ff * sizeof(float), allocations));
   d_shexp_up = static_cast<float*>(AllocBytes(kMaxChunk * shared_expert_ff * sizeof(float), allocations));
   d_shexp_act = static_cast<float*>(AllocBytes(kMaxChunk * shared_expert_ff * sizeof(float), allocations));
@@ -179,6 +186,15 @@ void GpuState::Free() {
   d_expert_act = nullptr;
   d_expert_down = nullptr;
   d_routed_accum = nullptr;
+  d_expert_ids = nullptr;
+  d_expert_weights = nullptr;
+  d_expert_counts = nullptr;
+  d_expert_offsets = nullptr;
+  d_expert_cursors = nullptr;
+  d_sorted_slots = nullptr;
+  d_tok_tile_expert = nullptr;
+  d_tok_tile_offset = nullptr;
+  d_num_tiles = nullptr;
   d_shexp_gate = nullptr;
   d_shexp_up = nullptr;
   d_shexp_act = nullptr;
@@ -668,17 +684,37 @@ void ForwardModelGpuChunk(
     const uint64_t expert_stride_up = layer.ffn_up_exps.RowBytes() * cfg.expert_ff;
     const uint64_t expert_stride_down = layer.ffn_down_exps.RowBytes() * H;
 
-    // Batched Gated SwiGLU: executes Gate + Up + SiLU-Mul for ALL tokens and ALL experts in ONE kernel launch!
-    DispatchMoeGatedSwigluBatch(
-        main, layer.ffn_gate_exps.data, layer.ffn_up_exps.data, layer.ffn_gate_exps.type,
-        expert_stride_gate, expert_stride_up, state.d_x_normed, state.d_expert_ids,
-        B, cfg.num_experts_used, cfg.expert_ff, H, state.d_expert_act);
+    if (B > 1) {
+      (void)hipMemsetAsync(state.d_routed_accum, 0, static_cast<size_t>(B) * H * sizeof(float), main);
+      DispatchSortMoESlots(
+          main, state.d_expert_ids, B * cfg.num_experts_used, cfg.num_experts,
+          state.d_expert_counts, state.d_expert_offsets, state.d_expert_cursors, state.d_sorted_slots,
+          state.d_tok_tile_expert, state.d_tok_tile_offset, state.d_num_tiles);
 
-    // Batched Down Projection & Weighted Accumulation for ALL tokens and ALL experts in ONE kernel launch!
-    DispatchMoeDownAccumBatch(
-        main, layer.ffn_down_exps.data, layer.ffn_down_exps.type,
-        expert_stride_down, state.d_expert_act, state.d_expert_weights, state.d_expert_ids,
-        B, cfg.num_experts_used, cfg.expert_ff, H, state.d_routed_accum);
+      DispatchMoeGatedSwigluGrouped(
+          main, layer.ffn_gate_exps.data, layer.ffn_up_exps.data, layer.ffn_gate_exps.type,
+          expert_stride_gate, expert_stride_up, state.d_x_normed, state.d_expert_counts,
+          state.d_expert_offsets, state.d_sorted_slots,
+          state.d_tok_tile_expert, state.d_tok_tile_offset, state.d_num_tiles,
+          B, cfg.num_experts, cfg.num_experts_used, cfg.expert_ff, H, state.d_expert_act);
+
+      DispatchMoeDownAccumGrouped(
+          main, layer.ffn_down_exps.data, layer.ffn_down_exps.type,
+          expert_stride_down, state.d_expert_act, state.d_expert_weights,
+          state.d_expert_counts, state.d_expert_offsets, state.d_sorted_slots,
+          state.d_tok_tile_expert, state.d_tok_tile_offset, state.d_num_tiles,
+          B, cfg.num_experts, cfg.num_experts_used, cfg.expert_ff, H, state.d_routed_accum);
+    } else {
+      DispatchMoeGatedSwigluBatch(
+          main, layer.ffn_gate_exps.data, layer.ffn_up_exps.data, layer.ffn_gate_exps.type,
+          expert_stride_gate, expert_stride_up, state.d_x_normed, state.d_expert_ids,
+          B, cfg.num_experts_used, cfg.expert_ff, H, state.d_expert_act);
+
+      DispatchMoeDownAccumBatch(
+          main, layer.ffn_down_exps.data, layer.ffn_down_exps.type,
+          expert_stride_down, state.d_expert_act, state.d_expert_weights, state.d_expert_ids,
+          B, cfg.num_experts_used, cfg.expert_ff, H, state.d_routed_accum);
+    }
 
     if (has_side) {
       (void)hipStreamWaitEvent(main, state.side_done, 0);
