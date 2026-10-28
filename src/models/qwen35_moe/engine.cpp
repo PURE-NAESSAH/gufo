@@ -278,4 +278,8 @@ bool Session::DecodeStep(std::size_t max_tokens,
   return true;
 }
 
+void Session::ConfigureVision(std::shared_ptr<const qwen::vision::Prompt> prompt) {
+  vision_prompt_ = std::move(prompt);
+}
+
 }  // namespace gufo::models::qwen35_moe

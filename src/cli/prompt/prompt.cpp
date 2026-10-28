@@ -624,15 +624,19 @@ std::shared_ptr<models::qwen::vision::Encoder> LoadQwenVision(
     const PromptOptions& opt, const core::GgufReader& reader) {
   if (opt.image_paths.empty() && opt.vision_model_path.empty())
     return {};
-  if (reader.GetMetadataUint64("qwen35.embedding_length") != 5120) {
+  const bool is_qwen35moe =
+      reader.GetMetadataString("general.architecture") == "qwen35moe";
+  const auto embd_len = reader.GetMetadataUint64("qwen35.embedding_length");
+  if (!is_qwen35moe && embd_len != 5120) {
     throw std::invalid_argument(
-        "image input supports Qwen3.8-27B and Flash-Next");
+        "image input supports Qwen3.8-27B, Flash-Next, and Qwen3.5-MoE");
   }
+  const std::uint32_t width = is_qwen35moe ? 3072U : 5120U;
   auto encoder = models::qwen::vision::Encoder::Open(
-      opt.model_path, opt.vision_model_path, 5120);
+      opt.model_path, opt.vision_model_path, width);
   if (!encoder)
     throw std::invalid_argument(
-        "image input requires a matching --mmproj BF16 sidecar");
+        "image input requires a matching --mmproj sidecar");
   return encoder;
 }
 
@@ -752,7 +756,8 @@ std::shared_ptr<models::qwen35_moe::Model> LoadQwen35MoeModel(
   }
   auto model = models::qwen35_moe::Model::Load(
       opt.model_path,
-      {.max_context = kDefaultContext},
+      {.max_context = kDefaultContext,
+       .vision_model_path = opt.vision_model_path},
       &error);
   PrintModelLoadTime(load_start, model != nullptr);
   if (!model)
@@ -1171,6 +1176,13 @@ int RunPrompt(std::span<const char* const> args) {
       return 1;
     }
     try {
+      if (!opt.image_paths.empty()) {
+        AttachImages(opt, messages.back());
+        auto vision = PrepareVision(opt, model->tokenizer(), messages,
+                                    model->VisionEncoder());
+        session->ConfigureVision(vision);
+        return GenerateQwen35MoeResponse(opt, *model, *session, vision->tokens);
+      }
       const auto ids = encode_prompt(model->tokenizer());
       const std::vector<tokenization::TokenId> prompt(ids.begin(), ids.end());
       return GenerateQwen35MoeResponse(opt, *model, *session, prompt);
@@ -1382,6 +1394,7 @@ int RunChat(std::span<const char* const> args) {
     }
     tokenizer = &qwen35_model->tokenizer();
     architecture = "qwen35moe";
+    vision_encoder = qwen35_model->VisionEncoder();
   }
   int device_count = 0;
   if (tokenizer == nullptr && !opt.force_cpu &&
@@ -1482,6 +1495,8 @@ int RunChat(std::span<const char* const> args) {
         prompt_tokens = vision->tokens;
         if (flash_session)
           flash_session->ConfigureVision(vision);
+        if (qwen35_session)
+          qwen35_session->ConfigureVision(vision);
         if (gpu_executor)
           gpu_executor->ConfigureVision(vision, vision_encoder);
       }
