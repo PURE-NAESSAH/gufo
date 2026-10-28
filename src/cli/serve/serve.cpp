@@ -1535,6 +1535,17 @@ int RunServe(std::span<const char* const> args) {
       std::cerr << "Error loading model '" << model << "': " << err << "\n";
       return 1;
     }
+    for (std::size_t i = 0; i < served_model_names.size(); ++i) {
+      if (const auto pos = served_model_names[i].rfind("-00001-of-");
+          pos != std::string::npos) {
+        auto clean = served_model_names[i].substr(0, pos);
+        if (!clean.empty() && std::ranges::find(served_model_names, clean) ==
+                                  served_model_names.end()) {
+          served_model_names.push_back(std::move(clean));
+          break;
+        }
+      }
+    }
     backend->set_model_ids(std::move(served_model_names));
     // As `gufo --version` prints it; CMake defines both for this target.
     backend->set_served_artifact(model,

@@ -3010,8 +3010,24 @@ public:
     return {{.kind = TextExecutionPlanKind::kSerial, .physical_width = 1}};
   }
 
+  [[nodiscard]] std::shared_ptr<const sampling::ConstraintVocabulary>
+  BuildConstraintVocabulary() const override {
+    return std::make_shared<const sampling::ConstraintVocabulary>(
+        model_->tokenizer().GetVocabSize(), [this](std::uint32_t id) {
+          const auto& tokenizer = model_->tokenizer();
+          return sampling::ConstraintVocabulary::Piece{
+              tokenizer.DecodeTokenCopy(id), tokenizer.IsStopToken(id)};
+        });
+  }
+
   [[nodiscard]] std::uint32_t VocabularySize() const override {
     return model_->VocabSize();
+  }
+
+  // llama.cpp's Qwen3-Coder format forces "\n</think>" and also ends
+  // reasoning at a tool call.
+  [[nodiscard]] ReasoningTags ReasoningBudgetTags() const override {
+    return {"<think>", "\n</think>", {"</think>", "<tool_call>"}};
   }
 
   [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
