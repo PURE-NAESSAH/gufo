@@ -13,6 +13,8 @@ if (ENGINE_ENABLE_HIP)
     hip/kernels.hip
     hip/gpu_runner.cpp)
   target_compile_definitions(gufo_qwen35_moe PRIVATE ENGINE_ENABLE_HIP=1)
+  target_compile_options(gufo_qwen35_moe PRIVATE
+    $<$<COMPILE_LANGUAGE:HIP>:/O2;/fp:fast;/clang:-O3;/clang:-ffast-math;/clang:-fno-finite-math-only;/clang:-Wno-unused-value;/clang:-Wno-unused-command-line-argument>)
   target_link_libraries(gufo_qwen35_moe PUBLIC
     hip::host
     roc::hipblas)

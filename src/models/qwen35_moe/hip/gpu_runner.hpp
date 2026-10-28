@@ -17,6 +17,8 @@ namespace gufo::models::qwen35_moe::hip {
 
 struct GpuState {
   uint32_t max_context{0};
+  static constexpr uint32_t kMaxChunk{64};
+  uint32_t* d_token_ids{nullptr};
 
   // Residual and activations
   float* d_hidden{nullptr};
@@ -54,6 +56,10 @@ struct GpuState {
   float* d_expert_act{nullptr};
   float* d_expert_down{nullptr};
   float* d_routed_accum{nullptr};
+  uint32_t* d_expert_ids{nullptr};
+  float* d_expert_weights{nullptr};
+  std::vector<uint32_t> h_expert_ids;
+  std::vector<float> h_expert_weights;
   float* d_shexp_gate{nullptr};
   float* d_shexp_up{nullptr};
   float* d_shexp_act{nullptr};
@@ -79,6 +85,13 @@ struct GpuState {
 void ForwardModelGpu(
     uint32_t token_id,
     uint32_t pos,
+    const ModelWeights& weights,
+    GpuState& state,
+    std::span<float> out_logits);
+
+void ForwardModelGpuChunk(
+    std::span<const uint32_t> tokens,
+    uint32_t pos0,
     const ModelWeights& weights,
     GpuState& state,
     std::span<float> out_logits);

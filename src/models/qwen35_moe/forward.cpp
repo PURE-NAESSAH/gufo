@@ -209,17 +209,17 @@ void ForwardEmbedding(std::uint32_t token_id, const TensorRef& token_embd,
 
 void ApplyRope(std::span<float> vec, std::uint32_t rotary_dim,
                std::uint32_t pos, float theta_base) noexcept {
-  const std::size_t pairs = rotary_dim / 2;
-  for (std::size_t i = 0; i < pairs; ++i) {
+  const std::size_t half_rot = rotary_dim / 2;
+  for (std::size_t i = 0; i < half_rot; ++i) {
     const float freq = 1.0F / std::pow(theta_base, static_cast<float>(2 * i) / static_cast<float>(rotary_dim));
     const float theta = static_cast<float>(pos) * freq;
     const float cos_th = std::cos(theta);
     const float sin_th = std::sin(theta);
 
-    const float x0 = vec[2 * i];
-    const float x1 = vec[(2 * i) + 1];
-    vec[2 * i] = (x0 * cos_th) - (x1 * sin_th);
-    vec[(2 * i) + 1] = (x0 * sin_th) + (x1 * cos_th);
+    const float x0 = vec[i];
+    const float x1 = vec[i + half_rot];
+    vec[i] = (x0 * cos_th) - (x1 * sin_th);
+    vec[i + half_rot] = (x0 * sin_th) + (x1 * cos_th);
   }
 }
 
@@ -352,7 +352,7 @@ void ForwardLinearAttention(const LayerWeights& layer, const Config& config,
     const float alpha_biased = arena.ssm_alpha[vh] + (dt_ptr ? dt_ptr[vh] : 0.0F);
     const float sp = Softplus(alpha_biased);
     const float a_val = a_ptr ? a_ptr[vh] : 0.0F;
-    decay[vh] = std::exp(-std::exp(a_val) * sp);
+    decay[vh] = std::exp(a_val * sp);
   }
 
   // 3. Conv1D causal update
@@ -371,10 +371,11 @@ void ForwardLinearAttention(const LayerWeights& layer, const Config& config,
 
     float dot = s3;
     if (conv1d_w != nullptr) {
-      dot = (s0 * conv1d_w[c]) +
-            (s1 * conv1d_w[conv_channels + c]) +
-            (s2 * conv1d_w[(2 * conv_channels) + c]) +
-            (s3 * conv1d_w[(3 * conv_channels) + c]);
+      const float* wc = conv1d_w + (c * 4);
+      dot = (s0 * wc[0]) +
+            (s1 * wc[1]) +
+            (s2 * wc[2]) +
+            (s3 * wc[3]);
     }
     arena.ssm_conv_out[c] = Silu(dot);
   }
@@ -398,8 +399,8 @@ void ForwardLinearAttention(const LayerWeights& layer, const Config& config,
       sum_q += qh[d] * qh[d];
       sum_k += kh_p[d] * kh_p[d];
     }
-    const float inv_q = 1.0F / std::sqrt(sum_q + config.rms_eps);
-    const float inv_k = 1.0F / std::sqrt(sum_k + config.rms_eps);
+    const float inv_q = 1.0F / std::max(std::sqrt(sum_q), config.rms_eps);
+    const float inv_k = 1.0F / std::max(std::sqrt(sum_k), config.rms_eps);
 
     for (std::size_t d = 0; d < ssm_head_dim; ++d) {
       q_normed[(kh * ssm_head_dim) + d] = qh[d] * inv_q;
@@ -408,8 +409,9 @@ void ForwardLinearAttention(const LayerWeights& layer, const Config& config,
   }
 
   // 5. DeltaNet recurrent state update and readout
+  const float scale = 1.0F / std::sqrt(static_cast<float>(ssm_head_dim));
   for (std::size_t vh = 0; vh < v_heads; ++vh) {
-    const std::size_t kh = vh / heads_ratio;
+    const std::size_t kh = vh % config.ssm_num_k_heads;
     const float* q_head = q_normed.data() + (kh * ssm_head_dim);
     const float* k_head = k_normed.data() + (kh * ssm_head_dim);
     const float* v_head = v_ptr + (vh * ssm_head_dim);
@@ -418,31 +420,37 @@ void ForwardLinearAttention(const LayerWeights& layer, const Config& config,
 
     auto S = ssm_state.DeltaNetState(ssm_layer_idx, static_cast<std::uint32_t>(vh));
 
-    // Outer product update: S = S * decay + (k * v^T)
-    for (std::size_t r = 0; r < ssm_head_dim; ++r) {
-      const float k_r = k_head[r];
-      float* s_row = S.data() + (r * ssm_head_dim);
-      for (std::size_t c = 0; c < ssm_head_dim; ++c) {
-        s_row[c] = (s_row[c] * d_val) + (k_r * v_head[c]);
-      }
-    }
-
-    // Readout: out = (S @ q) * beta
-    float* core_h = arena.ssm_core_out.data() + (vh * ssm_head_dim);
-    for (std::size_t c = 0; c < ssm_head_dim; ++c) {
+    // Step 1: kv_col = (S^T @ k)[col] = sum_r S[r, col] * k[r]
+    std::vector<float> kv_col(ssm_head_dim, 0.0F);
+    for (std::size_t col = 0; col < ssm_head_dim; ++col) {
       float dot = 0.0F;
       for (std::size_t r = 0; r < ssm_head_dim; ++r) {
-        dot += S[(r * ssm_head_dim) + c] * q_head[r];
+        dot += S[(r * ssm_head_dim) + col] * k_head[r];
       }
-      core_h[c] = dot * b_val;
+      kv_col[col] = dot;
+    }
+
+    // Step 2 & 3: delta_col = (v[col] - decay * kv_col) * beta
+    // S[r, col] = decay * S[r, col] + delta_col * k[r]
+    // Readout: core = (S^T @ q) * scale
+    float* core_h = arena.ssm_core_out.data() + (vh * ssm_head_dim);
+    for (std::size_t col = 0; col < ssm_head_dim; ++col) {
+      const float delta_col = (v_head[col] - (d_val * kv_col[col])) * b_val;
+      float readout = 0.0F;
+      for (std::size_t r = 0; r < ssm_head_dim; ++r) {
+        float& s_entry = S[(r * ssm_head_dim) + col];
+        s_entry = (s_entry * d_val) + (k_head[r] * delta_col);
+        readout += s_entry * q_head[r];
+      }
+      core_h[col] = readout * scale;
     }
 
     // Gated RMSNorm: rms_norm(core_h, layer.ssm_norm) * silu(z)
     ForwardRMSNorm(std::span<const float>(core_h, ssm_head_dim), layer.ssm_norm,
                    config.rms_eps, std::span<float>(core_h, ssm_head_dim));
     const float* z_h = arena.ssm_gate.data() + (vh * ssm_head_dim);
-    for (std::size_t c = 0; c < ssm_head_dim; ++c) {
-      core_h[c] *= Silu(z_h[c]);
+    for (std::size_t col = 0; col < ssm_head_dim; ++col) {
+      core_h[col] *= Silu(z_h[col]);
     }
   }
 

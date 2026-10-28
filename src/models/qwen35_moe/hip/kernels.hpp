@@ -132,6 +132,131 @@ void DispatchResidualAdd(
     uint32_t size,
     float* hidden);
 
+void DispatchGemm(
+    hipStream_t stream,
+    const void* A_data,
+    core::GgmlType A_type,
+    uint64_t expert_stride,
+    uint32_t expert_id,
+    const float* x,
+    float* y,
+    uint32_t M,
+    uint32_t K,
+    uint32_t B);
+
+void DispatchRMSNormBatch(
+    hipStream_t stream,
+    const float* x,
+    const void* weight_data,
+    core::GgmlType weight_type,
+    float eps,
+    uint32_t size,
+    uint32_t B,
+    float* out);
+
+void DispatchEmbeddingBatch(
+    hipStream_t stream,
+    const void* table,
+    core::GgmlType type,
+    const uint32_t* token_ids,
+    uint32_t B,
+    uint32_t hidden_size,
+    size_t row_bytes,
+    float* out);
+
+void DispatchRoPEBatch(
+    hipStream_t stream,
+    float* vec,
+    uint32_t rotary_dim,
+    uint32_t head_dim,
+    uint32_t num_heads,
+    uint32_t pos0,
+    uint32_t B,
+    float theta_base);
+
+void DispatchUnpackQGBatch(
+    hipStream_t stream,
+    const float* qg,
+    uint32_t num_heads,
+    uint32_t head_dim,
+    uint32_t B,
+    float* q_buf,
+    float* gate_buf);
+
+void DispatchAttentionPrefill(
+    hipStream_t stream,
+    const float* q_buf,
+    const float* gate_buf,
+    const float* kv_k,
+    const float* kv_v,
+    uint32_t num_heads,
+    uint32_t num_kv_heads,
+    uint32_t head_dim,
+    uint32_t max_context,
+    uint32_t pos0,
+    uint32_t B,
+    float* context_out);
+
+void DispatchStoreKVBatch(
+    hipStream_t stream,
+    const float* k_in,
+    const float* v_in,
+    uint32_t num_kv_heads,
+    uint32_t head_dim,
+    uint32_t max_context,
+    uint32_t pos0,
+    uint32_t B,
+    float* kv_k,
+    float* kv_v);
+
+void DispatchMoECombineSharedBatch(
+    hipStream_t stream,
+    const float* routed,
+    const float* shexp,
+    const float* d_shexp_gate_dot,
+    uint32_t H,
+    uint32_t B,
+    float* out);
+
+
+void DispatchMoeGatedSwigluBatch(
+    hipStream_t stream,
+    const void* gate_data,
+    const void* up_data,
+    core::GgmlType exp_type,
+    uint64_t expert_stride_gate,
+    uint64_t expert_stride_up,
+    const float* x,
+    const uint32_t* expert_ids,
+    uint32_t B,
+    uint32_t num_experts_used,
+    uint32_t expert_ff,
+    uint32_t H,
+    float* act_out);
+
+void DispatchMoeDownAccumBatch(
+    hipStream_t stream,
+    const void* down_data,
+    core::GgmlType exp_type,
+    uint64_t expert_stride_down,
+    const float* act_in,
+    const float* expert_weights,
+    const uint32_t* expert_ids,
+    uint32_t B,
+    uint32_t num_experts_used,
+    uint32_t expert_ff,
+    uint32_t H,
+    float* routed_accum);
+
+void DispatchRouterSoftmaxTopK(
+    hipStream_t stream,
+    const float* router_logits,
+    uint32_t num_experts,
+    uint32_t num_experts_used,
+    uint32_t B,
+    uint32_t* expert_ids,
+    float* expert_weights);
+
 }  // namespace gufo::models::qwen35_moe::hip
 
 #endif  // defined(ENGINE_ENABLE_HIP)

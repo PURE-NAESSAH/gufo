@@ -204,6 +204,38 @@ bool Session::Sync(std::span<const std::int32_t> prompt,
 
   tokens_.resize(common_prefix);
 
+#if defined(ENGINE_ENABLE_HIP)
+  constexpr std::size_t kChunkSize = hip::GpuState::kMaxChunk;
+  for (std::size_t i = common_prefix; i < prompt.size(); i += kChunkSize) {
+    if (cancellation_check_ && cancellation_check_()) {
+      if (error_msg) {
+        *error_msg = "Execution cancelled";
+      }
+      return false;
+    }
+
+    const std::size_t chunk_n = std::min(kChunkSize, prompt.size() - i);
+    const bool is_last = (i + chunk_n == prompt.size());
+    std::span<float> out_logits =
+        is_last ? std::span<float>(logits_) : std::span<float>{};
+
+    std::array<std::uint32_t, kChunkSize> u_tokens{};
+    for (std::size_t c = 0; c < chunk_n; ++c) {
+      u_tokens[c] = static_cast<std::uint32_t>(prompt[i + c]);
+    }
+
+    hip::ForwardModelGpuChunk(
+        std::span<const std::uint32_t>(u_tokens.data(), chunk_n),
+        static_cast<std::uint32_t>(i),
+        model_->weights(),
+        gpu_state_,
+        out_logits);
+
+    for (std::size_t c = 0; c < chunk_n; ++c) {
+      tokens_.push_back(prompt[i + c]);
+    }
+  }
+#else
   for (std::size_t i = common_prefix; i < prompt.size(); ++i) {
     if (cancellation_check_ && cancellation_check_()) {
       if (error_msg) {
@@ -218,15 +250,11 @@ bool Session::Sync(std::span<const std::int32_t> prompt,
     std::span<float> out_logits =
         is_last ? std::span<float>(logits_) : std::span<float>{};
 
-#if defined(ENGINE_ENABLE_HIP)
-    hip::ForwardModelGpu(static_cast<std::uint32_t>(token), pos, model_->weights(),
-                         gpu_state_, out_logits);
-#else
     ForwardModel(static_cast<std::uint32_t>(token), pos, model_->weights(),
                  kv_cache_, ssm_state_, scratch_, out_logits);
-#endif
     tokens_.push_back(token);
   }
+#endif
 
   valid_ = true;
   return true;
