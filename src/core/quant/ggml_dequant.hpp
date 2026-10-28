@@ -88,6 +88,48 @@ struct block_iq3_s {
   std::uint8_t signs[32];
   std::uint8_t scales[4];
 };
+
+// ROCmFP4 dual-scale layout: 16 bytes of packed Codebook10 4-bit codes + two UE4M3 scale bytes (QK=32, 18 bytes)
+struct block_rocmfp4 {
+  std::uint8_t qs[16];
+  std::uint8_t e[2];
+};
+
+// ROCmFP4 fast layout: 16 bytes of packed Codebook10 4-bit codes + one UE4M3 scale byte (QK=32, 17 bytes)
+struct block_rocmfp4_fast {
+  std::uint8_t qs[16];
+  std::uint8_t e;
+};
+
+// ROCmFP2 layout: 8 bytes of packed 2-bit codes + two UE4M3 scale bytes (QK=32, 10 bytes)
+struct block_rocmfp2 {
+  std::uint8_t qs[8];
+  std::uint8_t e[2];
+};
+
+// ROCmFP3 layout: 12 bytes of packed 3-bit codes + two UE4M3 scale bytes (QK=32, 14 bytes)
+struct block_rocmfp3 {
+  std::uint8_t qs[12];
+  std::uint8_t e[2];
+};
+
+// ROCmFP6 layout: 24 bytes of packed 6-bit codes + two UE4M3 scale bytes (QK=32, 26 bytes)
+struct block_rocmfp6 {
+  std::uint8_t qs[24];
+  std::uint8_t e[2];
+};
+
+// ROCmFP8 layout: 32 int8 codes + one UE4M3 scale byte (QK=32, 33 bytes)
+struct block_rocmfp8 {
+  std::int8_t qs[32];
+  std::uint8_t e;
+};
+
+// ROCmI4 layout: 16 bytes of packed two's-complement signed nibbles + one UE4M3 scale byte (QK=32, 17 bytes)
+struct block_rocmi4 {
+  std::uint8_t qs[16];
+  std::uint8_t e;
+};
 #pragma pack(pop)
 
 static_assert(sizeof(block_q4_K) == 144, "block_q4_K must be 144 bytes");
@@ -99,6 +141,13 @@ static_assert(sizeof(block_q8_0) == 34, "block_q8_0 must be 34 bytes");
 static_assert(sizeof(block_iq4_nl) == 18, "block_iq4_nl must be 18 bytes");
 static_assert(sizeof(block_iq4_xs) == 136, "block_iq4_xs must be 136 bytes");
 static_assert(sizeof(block_iq3_s) == 110, "block_iq3_s must be 110 bytes");
+static_assert(sizeof(block_rocmfp4) == 18, "block_rocmfp4 must be 18 bytes");
+static_assert(sizeof(block_rocmfp4_fast) == 17, "block_rocmfp4_fast must be 17 bytes");
+static_assert(sizeof(block_rocmfp2) == 10, "block_rocmfp2 must be 10 bytes");
+static_assert(sizeof(block_rocmfp3) == 14, "block_rocmfp3 must be 14 bytes");
+static_assert(sizeof(block_rocmfp6) == 26, "block_rocmfp6 must be 26 bytes");
+static_assert(sizeof(block_rocmfp8) == 33, "block_rocmfp8 must be 33 bytes");
+static_assert(sizeof(block_rocmi4) == 17, "block_rocmi4 must be 17 bytes");
 
 /// Non-linear 4-bit codebook shared by IQ4_NL and IQ4_XS.
 inline constexpr std::int8_t kValuesIq4Nl[16] = {
@@ -116,6 +165,13 @@ inline constexpr std::int8_t kValuesIq4Nl[16] = {
     case core::GgmlType::kQ8_1:
     case core::GgmlType::kQ8_0:
     case core::GgmlType::kIQ4_NL:
+    case core::GgmlType::kQ4_0_ROCMFP4:
+    case core::GgmlType::kQ4_0_ROCMFP4_FAST:
+    case core::GgmlType::kQ6_0_ROCMFPX:
+    case core::GgmlType::kQ8_0_ROCMFPX:
+    case core::GgmlType::kQ3_0_ROCMFPX:
+    case core::GgmlType::kQ2_0_ROCMFPX:
+    case core::GgmlType::kQ4_0_ROCMI4:
       return 32;
     case core::GgmlType::kQ2_K:
     case core::GgmlType::kIQ2_XXS:
@@ -202,6 +258,34 @@ float DotProductIQ3_S(const void* row_data, std::span<const float> vec,
 // Compute dot product of Q8_0 quantized row with FP32 vector
 float DotProductQ8_0(const void* row_data, std::span<const float> vec,
                      std::size_t k);
+
+// Dequantize ROCmFP4 and ROCmFPX rows to float
+void DequantizeQ4_0_ROCMFP4(const void* src, float* dst, std::size_t k);
+void DequantizeQ4_0_ROCMFP4_FAST(const void* src, float* dst, std::size_t k);
+void DequantizeQ2_0_ROCMFPX(const void* src, float* dst, std::size_t k);
+void DequantizeQ3_0_ROCMFPX(const void* src, float* dst, std::size_t k);
+void DequantizeQ6_0_ROCMFPX(const void* src, float* dst, std::size_t k);
+void DequantizeQ8_0_ROCMFPX(const void* src, float* dst, std::size_t k);
+void DequantizeQ4_0_ROCMI4(const void* src, float* dst, std::size_t k);
+
+// Compute dot product of ROCmFP4 / ROCmFPX quantized rows with FP32 vector
+float DotProductQ4_0_ROCMFP4(const void* row_data, std::span<const float> vec,
+                            std::size_t k);
+float DotProductQ4_0_ROCMFP4_FAST(const void* row_data,
+                                 std::span<const float> vec, std::size_t k);
+float DotProductQ2_0_ROCMFPX(const void* row_data, std::span<const float> vec,
+                            std::size_t k);
+float DotProductQ3_0_ROCMFPX(const void* row_data, std::span<const float> vec,
+                            std::size_t k);
+float DotProductQ6_0_ROCMFPX(const void* row_data, std::span<const float> vec,
+                            std::size_t k);
+float DotProductQ8_0_ROCMFPX(const void* row_data, std::span<const float> vec,
+                            std::size_t k);
+float DotProductQ4_0_ROCMI4(const void* row_data, std::span<const float> vec,
+                           std::size_t k);
+
+// Convert UE4M3 micro-scale byte to float (scale_half)
+float Ue4m3ToFloat(std::uint8_t e) noexcept;
 
 }  // namespace gufo::quant
 

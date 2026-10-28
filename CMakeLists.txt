@@ -1045,6 +1045,12 @@ if (BUILD_TESTING)
   add_test(NAME ggml_dequant_test COMMAND ggml_dequant_test)
   set_tests_properties(ggml_dequant_test PROPERTIES LABELS "cpu;core;quant")
 
+  add_executable(rocmfpx_dequant_test tests/core/rocmfpx_dequant_test.cpp)
+  target_link_libraries(rocmfpx_dequant_test PRIVATE gufo_core)
+
+  add_test(NAME rocmfpx_dequant_test COMMAND rocmfpx_dequant_test)
+  set_tests_properties(rocmfpx_dequant_test PROPERTIES LABELS "cpu;core;quant")
+
   add_executable(ggml_gemm_parity_test tests/core/ggml_gemm_parity_test.cpp)
   target_link_libraries(ggml_gemm_parity_test PRIVATE gufo_core)
 

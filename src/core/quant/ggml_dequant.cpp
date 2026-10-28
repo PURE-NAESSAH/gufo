@@ -159,6 +159,131 @@ float Q3Value(const block_q3_K& block,
          static_cast<float>(quant);
 }
 
+constexpr std::array<std::int8_t, 16> kRocmfp4Codebook = {
+    0, 1, 2, 3, 4, 6, 8, 10,
+    0, -1, -2, -3, -4, -6, -8, -10,
+};
+
+inline std::int8_t Rocmfp4Decode(std::uint8_t q) noexcept {
+  return kRocmfp4Codebook[q & 0x0FU];
+}
+
+#define GUFO_ROCM_SCALE_SUB(M) ((M) * 0x1p-10f)
+#define GUFO_ROCM_SCALE_E1(M)  ((8 + (M)) * 0x1p-10f)
+#define GUFO_ROCM_SCALE_E2(M)  ((8 + (M)) * 0x1p-9f)
+#define GUFO_ROCM_SCALE_E3(M)  ((8 + (M)) * 0x1p-8f)
+#define GUFO_ROCM_SCALE_E4(M)  ((8 + (M)) * 0x1p-7f)
+#define GUFO_ROCM_SCALE_E5(M)  ((8 + (M)) * 0x1p-6f)
+#define GUFO_ROCM_SCALE_E6(M)  ((8 + (M)) * 0x1p-5f)
+#define GUFO_ROCM_SCALE_E7(M)  ((8 + (M)) * 0x1p-4f)
+#define GUFO_ROCM_SCALE_E8(M)  ((8 + (M)) * 0x1p-3f)
+#define GUFO_ROCM_SCALE_E9(M)  ((8 + (M)) * 0x1p-2f)
+#define GUFO_ROCM_SCALE_E10(M) ((8 + (M)) * 0x1p-1f)
+#define GUFO_ROCM_SCALE_E11(M) ((8 + (M)) * 0x1p0f)
+#define GUFO_ROCM_SCALE_E12(M) ((8 + (M)) * 0x1p1f)
+#define GUFO_ROCM_SCALE_E13(M) ((8 + (M)) * 0x1p2f)
+#define GUFO_ROCM_SCALE_E14(M) ((8 + (M)) * 0x1p3f)
+#define GUFO_ROCM_SCALE_E15(M) ((8 + (M)) * 0x1p4f)
+
+constexpr std::array<float, 127> kRocmUe4m3ScaleTable = {
+    GUFO_ROCM_SCALE_SUB(0), GUFO_ROCM_SCALE_SUB(1), GUFO_ROCM_SCALE_SUB(2), GUFO_ROCM_SCALE_SUB(3),
+    GUFO_ROCM_SCALE_SUB(4), GUFO_ROCM_SCALE_SUB(5), GUFO_ROCM_SCALE_SUB(6), GUFO_ROCM_SCALE_SUB(7),
+    GUFO_ROCM_SCALE_E1(0),  GUFO_ROCM_SCALE_E1(1),  GUFO_ROCM_SCALE_E1(2),  GUFO_ROCM_SCALE_E1(3),
+    GUFO_ROCM_SCALE_E1(4),  GUFO_ROCM_SCALE_E1(5),  GUFO_ROCM_SCALE_E1(6),  GUFO_ROCM_SCALE_E1(7),
+    GUFO_ROCM_SCALE_E2(0),  GUFO_ROCM_SCALE_E2(1),  GUFO_ROCM_SCALE_E2(2),  GUFO_ROCM_SCALE_E2(3),
+    GUFO_ROCM_SCALE_E2(4),  GUFO_ROCM_SCALE_E2(5),  GUFO_ROCM_SCALE_E2(6),  GUFO_ROCM_SCALE_E2(7),
+    GUFO_ROCM_SCALE_E3(0),  GUFO_ROCM_SCALE_E3(1),  GUFO_ROCM_SCALE_E3(2),  GUFO_ROCM_SCALE_E3(3),
+    GUFO_ROCM_SCALE_E3(4),  GUFO_ROCM_SCALE_E3(5),  GUFO_ROCM_SCALE_E3(6),  GUFO_ROCM_SCALE_E3(7),
+    GUFO_ROCM_SCALE_E4(0),  GUFO_ROCM_SCALE_E4(1),  GUFO_ROCM_SCALE_E4(2),  GUFO_ROCM_SCALE_E4(3),
+    GUFO_ROCM_SCALE_E4(4),  GUFO_ROCM_SCALE_E4(5),  GUFO_ROCM_SCALE_E4(6),  GUFO_ROCM_SCALE_E4(7),
+    GUFO_ROCM_SCALE_E5(0),  GUFO_ROCM_SCALE_E5(1),  GUFO_ROCM_SCALE_E5(2),  GUFO_ROCM_SCALE_E5(3),
+    GUFO_ROCM_SCALE_E5(4),  GUFO_ROCM_SCALE_E5(5),  GUFO_ROCM_SCALE_E5(6),  GUFO_ROCM_SCALE_E5(7),
+    GUFO_ROCM_SCALE_E6(0),  GUFO_ROCM_SCALE_E6(1),  GUFO_ROCM_SCALE_E6(2),  GUFO_ROCM_SCALE_E6(3),
+    GUFO_ROCM_SCALE_E6(4),  GUFO_ROCM_SCALE_E6(5),  GUFO_ROCM_SCALE_E6(6),  GUFO_ROCM_SCALE_E6(7),
+    GUFO_ROCM_SCALE_E7(0),  GUFO_ROCM_SCALE_E7(1),  GUFO_ROCM_SCALE_E7(2),  GUFO_ROCM_SCALE_E7(3),
+    GUFO_ROCM_SCALE_E7(4),  GUFO_ROCM_SCALE_E7(5),  GUFO_ROCM_SCALE_E7(6),  GUFO_ROCM_SCALE_E7(7),
+    GUFO_ROCM_SCALE_E8(0),  GUFO_ROCM_SCALE_E8(1),  GUFO_ROCM_SCALE_E8(2),  GUFO_ROCM_SCALE_E8(3),
+    GUFO_ROCM_SCALE_E8(4),  GUFO_ROCM_SCALE_E8(5),  GUFO_ROCM_SCALE_E8(6),  GUFO_ROCM_SCALE_E8(7),
+    GUFO_ROCM_SCALE_E9(0),  GUFO_ROCM_SCALE_E9(1),  GUFO_ROCM_SCALE_E9(2),  GUFO_ROCM_SCALE_E9(3),
+    GUFO_ROCM_SCALE_E9(4),  GUFO_ROCM_SCALE_E9(5),  GUFO_ROCM_SCALE_E9(6),  GUFO_ROCM_SCALE_E9(7),
+    GUFO_ROCM_SCALE_E10(0), GUFO_ROCM_SCALE_E10(1), GUFO_ROCM_SCALE_E10(2), GUFO_ROCM_SCALE_E10(3),
+    GUFO_ROCM_SCALE_E10(4), GUFO_ROCM_SCALE_E10(5), GUFO_ROCM_SCALE_E10(6), GUFO_ROCM_SCALE_E10(7),
+    GUFO_ROCM_SCALE_E11(0), GUFO_ROCM_SCALE_E11(1), GUFO_ROCM_SCALE_E11(2), GUFO_ROCM_SCALE_E11(3),
+    GUFO_ROCM_SCALE_E11(4), GUFO_ROCM_SCALE_E11(5), GUFO_ROCM_SCALE_E11(6), GUFO_ROCM_SCALE_E11(7),
+    GUFO_ROCM_SCALE_E12(0), GUFO_ROCM_SCALE_E12(1), GUFO_ROCM_SCALE_E12(2), GUFO_ROCM_SCALE_E12(3),
+    GUFO_ROCM_SCALE_E12(4), GUFO_ROCM_SCALE_E12(5), GUFO_ROCM_SCALE_E12(6), GUFO_ROCM_SCALE_E12(7),
+    GUFO_ROCM_SCALE_E13(0), GUFO_ROCM_SCALE_E13(1), GUFO_ROCM_SCALE_E13(2), GUFO_ROCM_SCALE_E13(3),
+    GUFO_ROCM_SCALE_E13(4), GUFO_ROCM_SCALE_E13(5), GUFO_ROCM_SCALE_E13(6), GUFO_ROCM_SCALE_E13(7),
+    GUFO_ROCM_SCALE_E14(0), GUFO_ROCM_SCALE_E14(1), GUFO_ROCM_SCALE_E14(2), GUFO_ROCM_SCALE_E14(3),
+    GUFO_ROCM_SCALE_E14(4), GUFO_ROCM_SCALE_E14(5), GUFO_ROCM_SCALE_E14(6), GUFO_ROCM_SCALE_E14(7),
+    GUFO_ROCM_SCALE_E15(0), GUFO_ROCM_SCALE_E15(1), GUFO_ROCM_SCALE_E15(2), GUFO_ROCM_SCALE_E15(3),
+    GUFO_ROCM_SCALE_E15(4), GUFO_ROCM_SCALE_E15(5), GUFO_ROCM_SCALE_E15(6),
+};
+
+#undef GUFO_ROCM_SCALE_SUB
+#undef GUFO_ROCM_SCALE_E1
+#undef GUFO_ROCM_SCALE_E2
+#undef GUFO_ROCM_SCALE_E3
+#undef GUFO_ROCM_SCALE_E4
+#undef GUFO_ROCM_SCALE_E5
+#undef GUFO_ROCM_SCALE_E6
+#undef GUFO_ROCM_SCALE_E7
+#undef GUFO_ROCM_SCALE_E8
+#undef GUFO_ROCM_SCALE_E9
+#undef GUFO_ROCM_SCALE_E10
+#undef GUFO_ROCM_SCALE_E11
+#undef GUFO_ROCM_SCALE_E12
+#undef GUFO_ROCM_SCALE_E13
+#undef GUFO_ROCM_SCALE_E14
+#undef GUFO_ROCM_SCALE_E15
+
+inline float Rocmfp4Ue4m3ToFp32Half(std::uint8_t e) noexcept {
+  return e <= 0x7EU ? kRocmUe4m3ScaleTable[e] : 0.0f;
+}
+
+inline float RocmfpxScaleLookup(std::uint8_t e) noexcept {
+  return e <= 0x7EU ? kRocmUe4m3ScaleTable[e] : 0.0f;
+}
+
+inline std::int8_t RocmfpxDecodeFp2Code(std::uint8_t code) noexcept {
+  constexpr std::array<std::int8_t, 4> values = {-4, -1, 1, 4};
+  return values[code & 3U];
+}
+
+inline void RocmfpxFp3Unpack8(const std::uint8_t* src, std::uint8_t* c) noexcept {
+  c[0] = src[0] & 7U;
+  c[1] = (src[0] >> 3U) & 7U;
+  c[2] = static_cast<std::uint8_t>(((src[0] >> 6U) & 3U) | ((src[1] & 1U) << 2U));
+  c[3] = (src[1] >> 1U) & 7U;
+  c[4] = (src[1] >> 4U) & 7U;
+  c[5] = static_cast<std::uint8_t>(((src[1] >> 7U) & 1U) | ((src[2] & 3U) << 1U));
+  c[6] = (src[2] >> 2U) & 7U;
+  c[7] = (src[2] >> 5U) & 7U;
+}
+
+inline int RocmfpxDecodeFp3Code(std::uint8_t code) noexcept {
+  constexpr std::array<int, 4> mag = {0, 1, 2, 4};
+  const int value = mag[code & 3U];
+  return (code & 4U) ? -value : value;
+}
+
+inline void RocmfpxFp6Unpack4(const std::uint8_t* src, std::uint8_t* c) noexcept {
+  c[0] = src[0] & 0x3FU;
+  c[1] = static_cast<std::uint8_t>(((src[0] >> 6U) & 0x03U) | ((src[1] & 0x0FU) << 2U));
+  c[2] = static_cast<std::uint8_t>(((src[1] >> 4U) & 0x0FU) | ((src[2] & 0x03U) << 4U));
+  c[3] = (src[2] >> 2U) & 0x3FU;
+}
+
+inline int RocmfpxDecodeFp6Code(std::uint8_t code) noexcept {
+  const int mag = static_cast<int>(code & 31U);
+  return (code & 32U) ? -(mag == 0 ? 32 : mag) : mag;
+}
+
+inline std::int8_t Rocmi4NibbleToI8(std::uint8_t nibble) noexcept {
+  return static_cast<std::int8_t>((nibble & 0x8U) ? static_cast<int>(nibble | 0xF0U)
+                                                  : static_cast<int>(nibble & 0x7U));
+}
+
 }  // namespace
 
 std::size_t QuantizedRowBytes(core::GgmlType type,
@@ -215,6 +340,27 @@ std::size_t QuantizedRowBytes(core::GgmlType type,
       break;
     case core::GgmlType::kIQ3_S:
       block_bytes = sizeof(block_iq3_s);
+      break;
+    case core::GgmlType::kQ4_0_ROCMFP4:
+      block_bytes = sizeof(block_rocmfp4);
+      break;
+    case core::GgmlType::kQ4_0_ROCMFP4_FAST:
+      block_bytes = sizeof(block_rocmfp4_fast);
+      break;
+    case core::GgmlType::kQ2_0_ROCMFPX:
+      block_bytes = sizeof(block_rocmfp2);
+      break;
+    case core::GgmlType::kQ3_0_ROCMFPX:
+      block_bytes = sizeof(block_rocmfp3);
+      break;
+    case core::GgmlType::kQ6_0_ROCMFPX:
+      block_bytes = sizeof(block_rocmfp6);
+      break;
+    case core::GgmlType::kQ8_0_ROCMFPX:
+      block_bytes = sizeof(block_rocmfp8);
+      break;
+    case core::GgmlType::kQ4_0_ROCMI4:
+      block_bytes = sizeof(block_rocmi4);
       break;
     default:
       return 0;
@@ -671,6 +817,256 @@ float DotProductIQ3_S(const void* row_data, std::span<const float> vec,
     }
   }
   return sum;
+}
+
+void DequantizeQ4_0_ROCMFP4(const void* src, float* dst, std::size_t k) {
+  const auto* blocks = static_cast<const block_rocmfp4*>(src);
+  const std::size_t nb = k / 32;
+  for (std::size_t b = 0; b < nb; ++b) {
+    const float d0 = Rocmfp4Ue4m3ToFp32Half(blocks[b].e[0]);
+    const float d1 = Rocmfp4Ue4m3ToFp32Half(blocks[b].e[1]);
+    for (std::size_t j = 0; j < 16; ++j) {
+      dst[(b * 32) + j]      = static_cast<float>(Rocmfp4Decode(blocks[b].qs[j] & 0x0FU)) * d0;
+      dst[(b * 32) + j + 16] = static_cast<float>(Rocmfp4Decode(blocks[b].qs[j] >> 4U))   * d1;
+    }
+  }
+}
+
+void DequantizeQ4_0_ROCMFP4_FAST(const void* src, float* dst, std::size_t k) {
+  const auto* blocks = static_cast<const block_rocmfp4_fast*>(src);
+  const std::size_t nb = k / 32;
+  for (std::size_t b = 0; b < nb; ++b) {
+    const float d = Rocmfp4Ue4m3ToFp32Half(blocks[b].e);
+    for (std::size_t j = 0; j < 16; ++j) {
+      dst[(b * 32) + j]      = static_cast<float>(Rocmfp4Decode(blocks[b].qs[j] & 0x0FU)) * d;
+      dst[(b * 32) + j + 16] = static_cast<float>(Rocmfp4Decode(blocks[b].qs[j] >> 4U))   * d;
+    }
+  }
+}
+
+void DequantizeQ2_0_ROCMFPX(const void* src, float* dst, std::size_t k) {
+  const auto* blocks = static_cast<const block_rocmfp2*>(src);
+  const std::size_t nb = k / 32;
+  for (std::size_t b = 0; b < nb; ++b) {
+    for (int half = 0; half < 2; ++half) {
+      const float scale = RocmfpxScaleLookup(blocks[b].e[half]);
+      for (std::size_t j = 0; j < 16; ++j) {
+        const std::uint8_t code = static_cast<std::uint8_t>(
+            (blocks[b].qs[(half * 4) + (j / 4)] >> (2U * (j % 4))) & 3U);
+        dst[(b * 32) + (half * 16) + j] =
+            static_cast<float>(RocmfpxDecodeFp2Code(code)) * scale;
+      }
+    }
+  }
+}
+
+void DequantizeQ3_0_ROCMFPX(const void* src, float* dst, std::size_t k) {
+  const auto* blocks = static_cast<const block_rocmfp3*>(src);
+  const std::size_t nb = k / 32;
+  for (std::size_t b = 0; b < nb; ++b) {
+    std::array<std::uint8_t, 32> codes{};
+    RocmfpxFp3Unpack8(blocks[b].qs,      codes.data());
+    RocmfpxFp3Unpack8(blocks[b].qs + 3,  codes.data() + 8);
+    RocmfpxFp3Unpack8(blocks[b].qs + 6,  codes.data() + 16);
+    RocmfpxFp3Unpack8(blocks[b].qs + 9,  codes.data() + 24);
+
+    for (int half = 0; half < 2; ++half) {
+      const float scale = RocmfpxScaleLookup(blocks[b].e[half]);
+      for (std::size_t j = 0; j < 16; ++j) {
+        const std::size_t i = (half * 16) + j;
+        dst[(b * 32) + i] =
+            static_cast<float>(RocmfpxDecodeFp3Code(codes[i])) * scale;
+      }
+    }
+  }
+}
+
+void DequantizeQ6_0_ROCMFPX(const void* src, float* dst, std::size_t k) {
+  const auto* blocks = static_cast<const block_rocmfp6*>(src);
+  const std::size_t nb = k / 32;
+  for (std::size_t b = 0; b < nb; ++b) {
+    std::array<std::uint8_t, 32> codes{};
+    RocmfpxFp6Unpack4(blocks[b].qs,      codes.data());
+    RocmfpxFp6Unpack4(blocks[b].qs + 3,  codes.data() + 4);
+    RocmfpxFp6Unpack4(blocks[b].qs + 6,  codes.data() + 8);
+    RocmfpxFp6Unpack4(blocks[b].qs + 9,  codes.data() + 12);
+    RocmfpxFp6Unpack4(blocks[b].qs + 12, codes.data() + 16);
+    RocmfpxFp6Unpack4(blocks[b].qs + 15, codes.data() + 20);
+    RocmfpxFp6Unpack4(blocks[b].qs + 18, codes.data() + 24);
+    RocmfpxFp6Unpack4(blocks[b].qs + 21, codes.data() + 28);
+
+    for (int half = 0; half < 2; ++half) {
+      const float scale = RocmfpxScaleLookup(blocks[b].e[half]);
+      for (std::size_t j = 0; j < 16; ++j) {
+        const std::size_t i = (half * 16) + j;
+        dst[(b * 32) + i] =
+            static_cast<float>(RocmfpxDecodeFp6Code(codes[i])) * scale;
+      }
+    }
+  }
+}
+
+void DequantizeQ8_0_ROCMFPX(const void* src, float* dst, std::size_t k) {
+  const auto* blocks = static_cast<const block_rocmfp8*>(src);
+  const std::size_t nb = k / 32;
+  for (std::size_t b = 0; b < nb; ++b) {
+    const float scale = RocmfpxScaleLookup(blocks[b].e);
+    for (std::size_t i = 0; i < 32; ++i) {
+      dst[(b * 32) + i] = static_cast<float>(blocks[b].qs[i]) * scale;
+    }
+  }
+}
+
+void DequantizeQ4_0_ROCMI4(const void* src, float* dst, std::size_t k) {
+  const auto* blocks = static_cast<const block_rocmi4*>(src);
+  const std::size_t nb = k / 32;
+  for (std::size_t b = 0; b < nb; ++b) {
+    const float scale = RocmfpxScaleLookup(blocks[b].e);
+    for (std::size_t j = 0; j < 16; ++j) {
+      dst[(b * 32) + j]      = static_cast<float>(Rocmi4NibbleToI8(blocks[b].qs[j] & 0x0FU)) * scale;
+      dst[(b * 32) + j + 16] = static_cast<float>(Rocmi4NibbleToI8(blocks[b].qs[j] >> 4U))   * scale;
+    }
+  }
+}
+
+float DotProductQ4_0_ROCMFP4(const void* row_data, std::span<const float> vec,
+                             std::size_t k) {
+  const auto* blocks = static_cast<const block_rocmfp4*>(row_data);
+  const std::size_t nb = k / 32;
+  float sum = 0.0F;
+  for (std::size_t b = 0; b < nb; ++b) {
+    const float d0 = Rocmfp4Ue4m3ToFp32Half(blocks[b].e[0]);
+    const float d1 = Rocmfp4Ue4m3ToFp32Half(blocks[b].e[1]);
+    const float* v = vec.data() + (b * 32);
+    for (std::size_t j = 0; j < 16; ++j) {
+      sum += static_cast<float>(Rocmfp4Decode(blocks[b].qs[j] & 0x0FU)) * d0 * v[j];
+      sum += static_cast<float>(Rocmfp4Decode(blocks[b].qs[j] >> 4U))   * d1 * v[j + 16];
+    }
+  }
+  return sum;
+}
+
+float DotProductQ4_0_ROCMFP4_FAST(const void* row_data, std::span<const float> vec,
+                                  std::size_t k) {
+  const auto* blocks = static_cast<const block_rocmfp4_fast*>(row_data);
+  const std::size_t nb = k / 32;
+  float sum = 0.0F;
+  for (std::size_t b = 0; b < nb; ++b) {
+    const float d = Rocmfp4Ue4m3ToFp32Half(blocks[b].e);
+    const float* v = vec.data() + (b * 32);
+    for (std::size_t j = 0; j < 16; ++j) {
+      sum += static_cast<float>(Rocmfp4Decode(blocks[b].qs[j] & 0x0FU)) * d * v[j];
+      sum += static_cast<float>(Rocmfp4Decode(blocks[b].qs[j] >> 4U))   * d * v[j + 16];
+    }
+  }
+  return sum;
+}
+
+float DotProductQ2_0_ROCMFPX(const void* row_data, std::span<const float> vec,
+                             std::size_t k) {
+  const auto* blocks = static_cast<const block_rocmfp2*>(row_data);
+  const std::size_t nb = k / 32;
+  float sum = 0.0F;
+  for (std::size_t b = 0; b < nb; ++b) {
+    const float* v = vec.data() + (b * 32);
+    for (int half = 0; half < 2; ++half) {
+      const float scale = RocmfpxScaleLookup(blocks[b].e[half]);
+      for (std::size_t j = 0; j < 16; ++j) {
+        const std::uint8_t code = static_cast<std::uint8_t>(
+            (blocks[b].qs[(half * 4) + (j / 4)] >> (2U * (j % 4))) & 3U);
+        sum += static_cast<float>(RocmfpxDecodeFp2Code(code)) * scale *
+               v[(half * 16) + j];
+      }
+    }
+  }
+  return sum;
+}
+
+float DotProductQ3_0_ROCMFPX(const void* row_data, std::span<const float> vec,
+                             std::size_t k) {
+  const auto* blocks = static_cast<const block_rocmfp3*>(row_data);
+  const std::size_t nb = k / 32;
+  float sum = 0.0F;
+  for (std::size_t b = 0; b < nb; ++b) {
+    std::array<std::uint8_t, 32> codes{};
+    RocmfpxFp3Unpack8(blocks[b].qs,      codes.data());
+    RocmfpxFp3Unpack8(blocks[b].qs + 3,  codes.data() + 8);
+    RocmfpxFp3Unpack8(blocks[b].qs + 6,  codes.data() + 16);
+    RocmfpxFp3Unpack8(blocks[b].qs + 9,  codes.data() + 24);
+    const float* v = vec.data() + (b * 32);
+
+    for (int half = 0; half < 2; ++half) {
+      const float scale = RocmfpxScaleLookup(blocks[b].e[half]);
+      for (std::size_t j = 0; j < 16; ++j) {
+        const std::size_t i = (half * 16) + j;
+        sum += static_cast<float>(RocmfpxDecodeFp3Code(codes[i])) * scale * v[i];
+      }
+    }
+  }
+  return sum;
+}
+
+float DotProductQ6_0_ROCMFPX(const void* row_data, std::span<const float> vec,
+                             std::size_t k) {
+  const auto* blocks = static_cast<const block_rocmfp6*>(row_data);
+  const std::size_t nb = k / 32;
+  float sum = 0.0F;
+  for (std::size_t b = 0; b < nb; ++b) {
+    std::array<std::uint8_t, 32> codes{};
+    RocmfpxFp6Unpack4(blocks[b].qs,      codes.data());
+    RocmfpxFp6Unpack4(blocks[b].qs + 3,  codes.data() + 4);
+    RocmfpxFp6Unpack4(blocks[b].qs + 6,  codes.data() + 8);
+    RocmfpxFp6Unpack4(blocks[b].qs + 9,  codes.data() + 12);
+    RocmfpxFp6Unpack4(blocks[b].qs + 12, codes.data() + 16);
+    RocmfpxFp6Unpack4(blocks[b].qs + 15, codes.data() + 20);
+    RocmfpxFp6Unpack4(blocks[b].qs + 18, codes.data() + 24);
+    RocmfpxFp6Unpack4(blocks[b].qs + 21, codes.data() + 28);
+    const float* v = vec.data() + (b * 32);
+
+    for (int half = 0; half < 2; ++half) {
+      const float scale = RocmfpxScaleLookup(blocks[b].e[half]);
+      for (std::size_t j = 0; j < 16; ++j) {
+        const std::size_t i = (half * 16) + j;
+        sum += static_cast<float>(RocmfpxDecodeFp6Code(codes[i])) * scale * v[i];
+      }
+    }
+  }
+  return sum;
+}
+
+float DotProductQ8_0_ROCMFPX(const void* row_data, std::span<const float> vec,
+                             std::size_t k) {
+  const auto* blocks = static_cast<const block_rocmfp8*>(row_data);
+  const std::size_t nb = k / 32;
+  float sum = 0.0F;
+  for (std::size_t b = 0; b < nb; ++b) {
+    const float scale = RocmfpxScaleLookup(blocks[b].e);
+    const float* v = vec.data() + (b * 32);
+    for (std::size_t i = 0; i < 32; ++i) {
+      sum += static_cast<float>(blocks[b].qs[i]) * scale * v[i];
+    }
+  }
+  return sum;
+}
+
+float DotProductQ4_0_ROCMI4(const void* row_data, std::span<const float> vec,
+                            std::size_t k) {
+  const auto* blocks = static_cast<const block_rocmi4*>(row_data);
+  const std::size_t nb = k / 32;
+  float sum = 0.0F;
+  for (std::size_t b = 0; b < nb; ++b) {
+    const float scale = RocmfpxScaleLookup(blocks[b].e);
+    const float* v = vec.data() + (b * 32);
+    for (std::size_t j = 0; j < 16; ++j) {
+      sum += static_cast<float>(Rocmi4NibbleToI8(blocks[b].qs[j] & 0x0FU)) * scale * v[j];
+      sum += static_cast<float>(Rocmi4NibbleToI8(blocks[b].qs[j] >> 4U))   * scale * v[j + 16];
+    }
+  }
+  return sum;
+}
+
+float Ue4m3ToFloat(std::uint8_t e) noexcept {
+  return Rocmfp4Ue4m3ToFp32Half(e);
 }
 
 }  // namespace gufo::quant
