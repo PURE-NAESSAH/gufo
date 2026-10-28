@@ -128,6 +128,17 @@ std::size_t Model::ResidentBytes() const noexcept {
   return reader_ ? reader_->GetSize() : 0;
 }
 
+#if defined(ENGINE_ENABLE_HIP)
+Session::Session(std::shared_ptr<const Model> model, std::uint32_t max_context)
+    : model_(std::move(model)),
+      max_context_(max_context),
+      kv_cache_(model_->config(), 1),
+      ssm_state_(model_->config()),
+      scratch_(model_->config(), 1) {
+  logits_.resize(model_->config().vocab_size, 0.0f);
+  gpu_state_.Allocate(model_->config(), max_context_);
+}
+#else
 Session::Session(std::shared_ptr<const Model> model, std::uint32_t max_context)
     : model_(std::move(model)),
       max_context_(max_context),
@@ -135,10 +146,8 @@ Session::Session(std::shared_ptr<const Model> model, std::uint32_t max_context)
       ssm_state_(model_->config()),
       scratch_(model_->config(), max_context_) {
   logits_.resize(model_->config().vocab_size, 0.0f);
-#if defined(ENGINE_ENABLE_HIP)
-  gpu_state_.Allocate(model_->config(), max_context_);
-#endif
 }
+#endif
 
 void Session::Reset() {
   tokens_.clear();
