@@ -17,7 +17,7 @@ namespace gufo::models::qwen35_moe::hip {
 
 struct GpuState {
   uint32_t max_context{0};
-  static constexpr uint32_t kMaxChunk{64};
+  static constexpr uint32_t kMaxChunk{4096};
   uint32_t* d_token_ids{nullptr};
 
   // Residual and activations

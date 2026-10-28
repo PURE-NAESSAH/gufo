@@ -219,13 +219,13 @@ bool Session::Sync(std::span<const std::int32_t> prompt,
     std::span<float> out_logits =
         is_last ? std::span<float>(logits_) : std::span<float>{};
 
-    std::array<std::uint32_t, kChunkSize> u_tokens{};
+    std::vector<std::uint32_t> u_tokens(chunk_n);
     for (std::size_t c = 0; c < chunk_n; ++c) {
       u_tokens[c] = static_cast<std::uint32_t>(prompt[i + c]);
     }
 
     hip::ForwardModelGpuChunk(
-        std::span<const std::uint32_t>(u_tokens.data(), chunk_n),
+        u_tokens,
         static_cast<std::uint32_t>(i),
         model_->weights(),
         gpu_state_,
