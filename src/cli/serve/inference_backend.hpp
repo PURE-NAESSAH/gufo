@@ -26,6 +26,10 @@ namespace gufo::models::qwen38_flash_next {
 class Model;
 }
 
+namespace gufo::models::qwen35_moe {
+class Model;
+}
+
 namespace gufo::tokenization {
 class QwenTokenizer;
 }
@@ -118,6 +122,16 @@ public:
             TextDiskCacheConfig disk_cache_config = {},
             TextRunnerRamCacheOptions ram_cache_config = {});
 #endif
+
+  /// Installs a previously loaded Qwen3.5-MoE model (e.g. Ornith-1.5-122B).
+  bool load(std::shared_ptr<models::qwen35_moe::Model> model,
+            std::string* error, std::uint32_t max_context = 0,
+            std::size_t session_count = 1,
+            TextPrefillPolicy prefill_policy = {},
+            TextSchedulerPolicy scheduler_policy = {},
+            TextSpeculativeConfig speculative_config = {},
+            TextDiskCacheConfig disk_cache_config = {},
+            TextRunnerRamCacheOptions ram_cache_config = {});
 
   /// Stable model identifier used in API responses.
   [[nodiscard]] std::string model_id() const override;
