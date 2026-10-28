@@ -100,10 +100,50 @@ void GpuState::Allocate(const Config& cfg, uint32_t max_ctx) {
   h_expert_ids.resize(kMaxChunk * cfg.num_experts_used, 0);
   h_expert_weights.resize(kMaxChunk * cfg.num_experts_used, 0.0f);
 
+  if (main_stream == nullptr) {
+    hipError_t err = hipStreamCreateWithFlags(&main_stream, hipStreamNonBlocking);
+    if (err != hipSuccess) {
+      std::fprintf(stderr, "[GpuState] hipStreamCreateWithFlags(main_stream) failed: %s\n", hipGetErrorString(err));
+      main_stream = nullptr;
+    }
+  }
+  if (side_stream == nullptr) {
+    hipError_t err = hipStreamCreateWithFlags(&side_stream, hipStreamNonBlocking);
+    if (err != hipSuccess) {
+      std::fprintf(stderr, "[GpuState] hipStreamCreateWithFlags(side_stream) failed: %s\n", hipGetErrorString(err));
+      side_stream = nullptr;
+    }
+  }
+  if (side_start == nullptr) {
+    (void)hipEventCreateWithFlags(&side_start, hipEventDisableTiming);
+  }
+  if (side_done == nullptr) {
+    (void)hipEventCreateWithFlags(&side_done, hipEventDisableTiming);
+  }
+
   Reset(cfg, max_ctx);
 }
 
 void GpuState::Free() {
+  if (main_stream != nullptr) {
+    (void)hipStreamSynchronize(main_stream);
+    (void)hipStreamDestroy(main_stream);
+    main_stream = nullptr;
+  }
+  if (side_stream != nullptr) {
+    (void)hipStreamSynchronize(side_stream);
+    (void)hipStreamDestroy(side_stream);
+    side_stream = nullptr;
+  }
+  if (side_start != nullptr) {
+    (void)hipEventDestroy(side_start);
+    side_start = nullptr;
+  }
+  if (side_done != nullptr) {
+    (void)hipEventDestroy(side_done);
+    side_done = nullptr;
+  }
+
   for (void* p : allocations) {
     if (p != nullptr) {
       (void)hipFree(p);
@@ -158,18 +198,22 @@ void GpuState::Reset(const Config& cfg, uint32_t max_ctx) {
 
   if (d_conv_state != nullptr) {
     const size_t conv_elements = static_cast<size_t>(ssm_layers) * 3 * conv_channels;
-    (void)hipMemsetAsync(d_conv_state, 0, conv_elements * sizeof(float), nullptr);
+    (void)hipMemsetAsync(d_conv_state, 0, conv_elements * sizeof(float), main_stream);
   }
   if (d_deltanet_state != nullptr) {
     const size_t deltanet_elements = static_cast<size_t>(ssm_layers) * v_heads * ssm_head_dim * ssm_head_dim;
-    (void)hipMemsetAsync(d_deltanet_state, 0, deltanet_elements * sizeof(float), nullptr);
+    (void)hipMemsetAsync(d_deltanet_state, 0, deltanet_elements * sizeof(float), main_stream);
   }
   if (d_kv_k != nullptr && d_kv_v != nullptr) {
     const size_t kv_elements = static_cast<size_t>(full_layers) * cfg.num_kv_heads * max_context * cfg.head_dim;
-    (void)hipMemsetAsync(d_kv_k, 0, kv_elements * sizeof(float), nullptr);
-    (void)hipMemsetAsync(d_kv_v, 0, kv_elements * sizeof(float), nullptr);
+    (void)hipMemsetAsync(d_kv_k, 0, kv_elements * sizeof(float), main_stream);
+    (void)hipMemsetAsync(d_kv_v, 0, kv_elements * sizeof(float), main_stream);
   }
-  (void)hipDeviceSynchronize();
+  if (main_stream != nullptr) {
+    (void)hipStreamSynchronize(main_stream);
+  } else {
+    (void)hipDeviceSynchronize();
+  }
 }
 
 void ForwardModelGpu(
@@ -178,12 +222,14 @@ void ForwardModelGpu(
     const ModelWeights& weights,
     GpuState& state,
     std::span<float> out_logits) {
-  hipStream_t stream = nullptr;
+  const hipStream_t main = state.main_stream;
+  const hipStream_t side = (state.side_stream != nullptr) ? state.side_stream : main;
+  const bool has_side = (state.side_stream != nullptr && state.side_start != nullptr && state.side_done != nullptr);
   const auto& cfg = weights.config;
   const uint32_t H = cfg.hidden_size;
 
   // 1. Embedding lookup -> state.d_hidden
-  DispatchEmbedding(stream, weights.token_embd.data, weights.token_embd.type,
+  DispatchEmbedding(main, weights.token_embd.data, weights.token_embd.type,
                     token_id, H, weights.token_embd.RowBytes(), state.d_hidden);
 
   uint32_t full_attn_idx = 0;
@@ -193,49 +239,64 @@ void ForwardModelGpu(
     const auto& layer = weights.layers[l];
 
     // 2. Pre-attention RMSNorm: d_hidden -> d_x_normed
-    DispatchRMSNorm(stream, state.d_hidden, layer.attn_norm.data, layer.attn_norm.type,
+    DispatchRMSNorm(main, state.d_hidden, layer.attn_norm.data, layer.attn_norm.type,
                     cfg.rms_eps, H, state.d_x_normed);
 
     if (layer.is_full_attention) {
-      // Joint Q + Gate projection: [H -> 2 * num_heads * head_dim]
-      DispatchGemv(stream, layer.attn_q.data, layer.attn_q.type, 0, 0,
+      if (has_side) {
+        (void)hipEventRecord(state.side_start, main);
+        (void)hipStreamWaitEvent(side, state.side_start, 0);
+
+        // K and V projections on side stream
+        DispatchGemv(side, layer.attn_k.data, layer.attn_k.type, 0, 0,
+                     state.d_x_normed, state.d_k_buf, cfg.num_kv_heads * cfg.head_dim, H);
+        DispatchGemv(side, layer.attn_v.data, layer.attn_v.type, 0, 0,
+                     state.d_x_normed, state.d_v_buf, cfg.num_kv_heads * cfg.head_dim, H);
+        (void)hipEventRecord(state.side_done, side);
+      } else {
+        DispatchGemv(main, layer.attn_k.data, layer.attn_k.type, 0, 0,
+                     state.d_x_normed, state.d_k_buf, cfg.num_kv_heads * cfg.head_dim, H);
+        DispatchGemv(main, layer.attn_v.data, layer.attn_v.type, 0, 0,
+                     state.d_x_normed, state.d_v_buf, cfg.num_kv_heads * cfg.head_dim, H);
+      }
+
+      // Joint Q + Gate projection on main stream
+      DispatchGemv(main, layer.attn_q.data, layer.attn_q.type, 0, 0,
                    state.d_x_normed, state.d_qg_buf, 2 * cfg.num_heads * cfg.head_dim, H);
 
-      // K and V projections: [H -> num_kv_heads * head_dim]
-      DispatchGemv(stream, layer.attn_k.data, layer.attn_k.type, 0, 0,
-                   state.d_x_normed, state.d_k_buf, cfg.num_kv_heads * cfg.head_dim, H);
-      DispatchGemv(stream, layer.attn_v.data, layer.attn_v.type, 0, 0,
-                   state.d_x_normed, state.d_v_buf, cfg.num_kv_heads * cfg.head_dim, H);
-
       // Unpack Q and Gate
-      DispatchUnpackQG(stream, state.d_qg_buf, cfg.num_heads, cfg.head_dim,
+      DispatchUnpackQG(main, state.d_qg_buf, cfg.num_heads, cfg.head_dim,
                        state.d_q_buf, state.d_gate_buf);
 
       // Q-norm and RoPE
-      DispatchRMSNormBatch(stream, state.d_q_buf, layer.attn_q_norm.data, layer.attn_q_norm.type,
+      DispatchRMSNormBatch(main, state.d_q_buf, layer.attn_q_norm.data, layer.attn_q_norm.type,
                            cfg.rms_eps, cfg.head_dim, cfg.num_heads, state.d_q_buf);
-      DispatchRoPE(stream, state.d_q_buf, cfg.rotary_dim, cfg.head_dim, cfg.num_heads, pos, cfg.rope_theta);
+      DispatchRoPE(main, state.d_q_buf, cfg.rotary_dim, cfg.head_dim, cfg.num_heads, pos, cfg.rope_theta);
+
+      if (has_side) {
+        (void)hipStreamWaitEvent(main, state.side_done, 0);
+      }
 
       // K-norm and RoPE
-      DispatchRMSNormBatch(stream, state.d_k_buf, layer.attn_k_norm.data, layer.attn_k_norm.type,
+      DispatchRMSNormBatch(main, state.d_k_buf, layer.attn_k_norm.data, layer.attn_k_norm.type,
                            cfg.rms_eps, cfg.head_dim, cfg.num_kv_heads, state.d_k_buf);
-      DispatchRoPE(stream, state.d_k_buf, cfg.rotary_dim, cfg.head_dim, cfg.num_kv_heads, pos, cfg.rope_theta);
+      DispatchRoPE(main, state.d_k_buf, cfg.rotary_dim, cfg.head_dim, cfg.num_kv_heads, pos, cfg.rope_theta);
 
       // Store in KV cache
       float* layer_kv_k = state.d_kv_k +
                           (static_cast<size_t>(full_attn_idx) * cfg.num_kv_heads * state.max_context * cfg.head_dim);
       float* layer_kv_v = state.d_kv_v +
                           (static_cast<size_t>(full_attn_idx) * cfg.num_kv_heads * state.max_context * cfg.head_dim);
-      DispatchStoreKV(stream, state.d_k_buf, state.d_v_buf, cfg.num_kv_heads, cfg.head_dim,
+      DispatchStoreKV(main, state.d_k_buf, state.d_v_buf, cfg.num_kv_heads, cfg.head_dim,
                       state.max_context, pos, layer_kv_k, layer_kv_v);
 
       // Attention decode
-      DispatchAttentionDecode(stream, state.d_q_buf, state.d_gate_buf, layer_kv_k, layer_kv_v,
+      DispatchAttentionDecode(main, state.d_q_buf, state.d_gate_buf, layer_kv_k, layer_kv_v,
                               cfg.num_heads, cfg.num_kv_heads, cfg.head_dim, state.max_context, pos,
                               state.d_context);
 
       // Output projection: [num_heads * head_dim -> H]
-      DispatchGemv(stream, layer.attn_output.data, layer.attn_output.type, 0, 0,
+      DispatchGemv(main, layer.attn_output.data, layer.attn_output.type, 0, 0,
                    state.d_context, state.d_attn_out, H, cfg.num_heads * cfg.head_dim);
 
       ++full_attn_idx;
@@ -247,102 +308,149 @@ void ForwardModelGpu(
       const uint32_t k_heads = cfg.ssm_num_k_heads;
       const uint32_t ssm_head_dim = cfg.ssm_head_dim;
 
-      DispatchGemv(stream, layer.ssm_qkv.data, layer.ssm_qkv.type, 0, 0,
+      if (has_side) {
+        (void)hipEventRecord(state.side_start, main);
+        (void)hipStreamWaitEvent(side, state.side_start, 0);
+
+        // Side stream computes gate, alpha, beta in parallel
+        DispatchGemv(side, layer.ssm_gate.data, layer.ssm_gate.type, 0, 0,
+                     state.d_x_normed, state.d_ssm_gate, val_dim, H);
+        DispatchGemv(side, layer.ssm_alpha.data, layer.ssm_alpha.type, 0, 0,
+                     state.d_x_normed, state.d_ssm_alpha, v_heads, H);
+        DispatchGemv(side, layer.ssm_beta.data, layer.ssm_beta.type, 0, 0,
+                     state.d_x_normed, state.d_ssm_beta, v_heads, H);
+        (void)hipEventRecord(state.side_done, side);
+      } else {
+        DispatchGemv(main, layer.ssm_gate.data, layer.ssm_gate.type, 0, 0,
+                     state.d_x_normed, state.d_ssm_gate, val_dim, H);
+        DispatchGemv(main, layer.ssm_alpha.data, layer.ssm_alpha.type, 0, 0,
+                     state.d_x_normed, state.d_ssm_alpha, v_heads, H);
+        DispatchGemv(main, layer.ssm_beta.data, layer.ssm_beta.type, 0, 0,
+                     state.d_x_normed, state.d_ssm_beta, v_heads, H);
+      }
+
+      // Main stream computes ssm_qkv
+      DispatchGemv(main, layer.ssm_qkv.data, layer.ssm_qkv.type, 0, 0,
                    state.d_x_normed, state.d_ssm_qkv, conv_channels, H);
-      DispatchGemv(stream, layer.ssm_gate.data, layer.ssm_gate.type, 0, 0,
-                   state.d_x_normed, state.d_ssm_gate, val_dim, H);
-      DispatchGemv(stream, layer.ssm_alpha.data, layer.ssm_alpha.type, 0, 0,
-                   state.d_x_normed, state.d_ssm_alpha, v_heads, H);
-      DispatchGemv(stream, layer.ssm_beta.data, layer.ssm_beta.type, 0, 0,
-                   state.d_x_normed, state.d_ssm_beta, v_heads, H);
+
+      if (has_side) {
+        (void)hipStreamWaitEvent(main, state.side_done, 0);
+      }
 
       float* layer_conv_state = state.d_conv_state + (static_cast<size_t>(ssm_layer_idx) * 3 * conv_channels);
       float* layer_deltanet_state =
           state.d_deltanet_state + (static_cast<size_t>(ssm_layer_idx) * v_heads * ssm_head_dim * ssm_head_dim);
 
       DispatchSsmStep(
-          stream, state.d_ssm_qkv, state.d_ssm_gate, state.d_ssm_alpha, state.d_ssm_beta,
+          main, state.d_ssm_qkv, state.d_ssm_gate, state.d_ssm_alpha, state.d_ssm_beta,
           layer.ssm_dt.data, layer.ssm_a.data, layer.ssm_conv1d.data, layer.ssm_norm.data,
           conv_channels, v_heads, k_heads, ssm_head_dim, cfg.rms_eps,
           layer_conv_state, layer_deltanet_state,
           state.d_decay, state.d_beta_sig, state.d_ssm_conv_out,
           state.d_ssm_q_normed, state.d_ssm_k_normed, state.d_ssm_core_out);
 
-      DispatchGemv(stream, layer.ssm_out.data, layer.ssm_out.type, 0, 0,
+      DispatchGemv(main, layer.ssm_out.data, layer.ssm_out.type, 0, 0,
                    state.d_ssm_core_out, state.d_attn_out, H, val_dim);
 
       ++ssm_layer_idx;
     }
 
     // Residual add: d_hidden += d_attn_out
-    DispatchResidualAdd(stream, state.d_attn_out, H, state.d_hidden);
+    DispatchResidualAdd(main, state.d_attn_out, H, state.d_hidden);
 
     // Post-attention RMSNorm: d_hidden -> d_x_normed
-    DispatchRMSNorm(stream, state.d_hidden, layer.post_attention_norm.data, layer.post_attention_norm.type,
+    DispatchRMSNorm(main, state.d_hidden, layer.post_attention_norm.data, layer.post_attention_norm.type,
                     cfg.rms_eps, H, state.d_x_normed);
 
-    // MoE Routing & FFN
-    // 1. Router GEMV: [H -> num_experts]
-    DispatchGemv(stream, layer.ffn_gate_inp.data, layer.ffn_gate_inp.type, 0, 0,
+    // MoE Routing & FFN with Shared Expert Overlap
+    if (has_side) {
+      (void)hipEventRecord(state.side_start, main);
+      (void)hipStreamWaitEvent(side, state.side_start, 0);
+
+      // Shared expert evaluated in parallel on side stream
+      DispatchGemv(side, layer.ffn_gate_shexp.data, layer.ffn_gate_shexp.type, 0, 0,
+                   state.d_x_normed, state.d_shexp_gate, cfg.shared_expert_ff, H);
+      DispatchGemv(side, layer.ffn_up_shexp.data, layer.ffn_up_shexp.type, 0, 0,
+                   state.d_x_normed, state.d_shexp_up, cfg.shared_expert_ff, H);
+
+      DispatchSiluMul(side, state.d_shexp_gate, state.d_shexp_up, cfg.shared_expert_ff, state.d_shexp_act);
+
+      DispatchGemv(side, layer.ffn_down_shexp.data, layer.ffn_down_shexp.type, 0, 0,
+                   state.d_shexp_act, state.d_shexp_down, H, cfg.shared_expert_ff);
+
+      // Shared expert gating dot product
+      if (!layer.ffn_gate_inp_shexp.empty()) {
+        DispatchGemv(side, layer.ffn_gate_inp_shexp.data, layer.ffn_gate_inp_shexp.type, 0, 0,
+                     state.d_x_normed, state.d_shexp_dot, 1, H);
+      } else {
+        (void)hipMemsetAsync(state.d_shexp_dot, 0, sizeof(float), side);
+      }
+      (void)hipEventRecord(state.side_done, side);
+    } else {
+      DispatchGemv(main, layer.ffn_gate_shexp.data, layer.ffn_gate_shexp.type, 0, 0,
+                   state.d_x_normed, state.d_shexp_gate, cfg.shared_expert_ff, H);
+      DispatchGemv(main, layer.ffn_up_shexp.data, layer.ffn_up_shexp.type, 0, 0,
+                   state.d_x_normed, state.d_shexp_up, cfg.shared_expert_ff, H);
+
+      DispatchSiluMul(main, state.d_shexp_gate, state.d_shexp_up, cfg.shared_expert_ff, state.d_shexp_act);
+
+      DispatchGemv(main, layer.ffn_down_shexp.data, layer.ffn_down_shexp.type, 0, 0,
+                   state.d_shexp_act, state.d_shexp_down, H, cfg.shared_expert_ff);
+
+      if (!layer.ffn_gate_inp_shexp.empty()) {
+        DispatchGemv(main, layer.ffn_gate_inp_shexp.data, layer.ffn_gate_inp_shexp.type, 0, 0,
+                     state.d_x_normed, state.d_shexp_dot, 1, H);
+      } else {
+        (void)hipMemsetAsync(state.d_shexp_dot, 0, sizeof(float), main);
+      }
+    }
+
+    // Router GEMV on main stream: [H -> num_experts]
+    DispatchGemv(main, layer.ffn_gate_inp.data, layer.ffn_gate_inp.type, 0, 0,
                  state.d_x_normed, state.d_router_logits, cfg.num_experts, H);
 
     // On-device Top-K selection (zero host sync!)
-    DispatchRouterSoftmaxTopK(stream, state.d_router_logits, cfg.num_experts,
+    DispatchRouterSoftmaxTopK(main, state.d_router_logits, cfg.num_experts,
                               cfg.num_experts_used, 1, state.d_expert_ids, state.d_expert_weights);
 
     const uint64_t expert_stride_gate = layer.ffn_gate_exps.RowBytes() * cfg.expert_ff;
     const uint64_t expert_stride_up = layer.ffn_up_exps.RowBytes() * cfg.expert_ff;
     const uint64_t expert_stride_down = layer.ffn_down_exps.RowBytes() * H;
 
-    // 2. Batched MoE: all 8 experts in parallel
+    // Batched MoE: all experts in parallel on main stream
     DispatchMoeGatedSwigluBatch(
-        stream, layer.ffn_gate_exps.data, layer.ffn_up_exps.data, layer.ffn_gate_exps.type,
+        main, layer.ffn_gate_exps.data, layer.ffn_up_exps.data, layer.ffn_gate_exps.type,
         expert_stride_gate, expert_stride_up, state.d_x_normed, state.d_expert_ids,
         1, cfg.num_experts_used, cfg.expert_ff, H, state.d_expert_act);
 
     DispatchMoeDownAccumBatch(
-        stream, layer.ffn_down_exps.data, layer.ffn_down_exps.type,
+        main, layer.ffn_down_exps.data, layer.ffn_down_exps.type,
         expert_stride_down, state.d_expert_act, state.d_expert_weights, state.d_expert_ids,
         1, cfg.num_experts_used, cfg.expert_ff, H, state.d_routed_accum);
 
-    // Shared expert
-    DispatchGemv(stream, layer.ffn_gate_shexp.data, layer.ffn_gate_shexp.type, 0, 0,
-                 state.d_x_normed, state.d_shexp_gate, cfg.shared_expert_ff, H);
-    DispatchGemv(stream, layer.ffn_up_shexp.data, layer.ffn_up_shexp.type, 0, 0,
-                 state.d_x_normed, state.d_shexp_up, cfg.shared_expert_ff, H);
-
-    DispatchSiluMul(stream, state.d_shexp_gate, state.d_shexp_up, cfg.shared_expert_ff, state.d_shexp_act);
-
-    DispatchGemv(stream, layer.ffn_down_shexp.data, layer.ffn_down_shexp.type, 0, 0,
-                 state.d_shexp_act, state.d_shexp_down, H, cfg.shared_expert_ff);
-
-    // Shared expert gating dot product
-    if (!layer.ffn_gate_inp_shexp.empty()) {
-      DispatchGemv(stream, layer.ffn_gate_inp_shexp.data, layer.ffn_gate_inp_shexp.type, 0, 0,
-                   state.d_x_normed, state.d_shexp_dot, 1, H);
-    } else {
-      (void)hipMemsetAsync(state.d_shexp_dot, 0, sizeof(float), stream);
+    if (has_side) {
+      (void)hipStreamWaitEvent(main, state.side_done, 0);
     }
 
     // Combine routed + shared expert
-    DispatchMoECombineSharedBatch(stream, state.d_routed_accum, state.d_shexp_down, state.d_shexp_dot, H, 1, state.d_moe_out);
+    DispatchMoECombineSharedBatch(main, state.d_routed_accum, state.d_shexp_down, state.d_shexp_dot, H, 1, state.d_moe_out);
 
     // Residual add: d_hidden += d_moe_out
-    DispatchResidualAdd(stream, state.d_moe_out, H, state.d_hidden);
+    DispatchResidualAdd(main, state.d_moe_out, H, state.d_hidden);
   }
 
   // Final Output Norm & LM Head (if out_logits requested)
   if (!out_logits.empty()) {
-    DispatchRMSNorm(stream, state.d_hidden, weights.output_norm.data, weights.output_norm.type,
+    DispatchRMSNorm(main, state.d_hidden, weights.output_norm.data, weights.output_norm.type,
                     cfg.rms_eps, H, state.d_x_normed);
 
-    DispatchGemv(stream, weights.output.data, weights.output.type, 0, 0,
+    DispatchGemv(main, weights.output.data, weights.output.type, 0, 0,
                  state.d_x_normed, state.d_logits, cfg.vocab_size, H);
 
-    (void)hipMemcpyDtoHAsync(out_logits.data(), state.d_logits, cfg.vocab_size * sizeof(float), stream);
-    (void)hipStreamSynchronize(stream);
+    (void)hipMemcpyDtoHAsync(out_logits.data(), state.d_logits, cfg.vocab_size * sizeof(float), main);
+    (void)hipStreamSynchronize(main);
   } else {
-    (void)hipStreamSynchronize(stream);
+    (void)hipStreamSynchronize(main);
   }
 }
 
@@ -364,12 +472,14 @@ void ForwardModelGpuChunk(
   auto t_chunk_start = std::chrono::high_resolution_clock::now();
   const auto& cfg = weights.config;
   const uint32_t H = cfg.hidden_size;
-  hipStream_t stream = nullptr;
+  const hipStream_t main = state.main_stream;
+  const hipStream_t side = (state.side_stream != nullptr) ? state.side_stream : main;
+  const bool has_side = (state.side_stream != nullptr && state.side_start != nullptr && state.side_done != nullptr);
 
   // 1. Copy tokens to device and dispatch batched embedding
-  (void)hipMemcpyHtoDAsync(state.d_token_ids, tokens.data(), B * sizeof(uint32_t), stream);
+  (void)hipMemcpyHtoDAsync(state.d_token_ids, tokens.data(), B * sizeof(uint32_t), main);
   const size_t embd_row_bytes = weights.token_embd.RowBytes();
-  DispatchEmbeddingBatch(stream, weights.token_embd.data, weights.token_embd.type,
+  DispatchEmbeddingBatch(main, weights.token_embd.data, weights.token_embd.type,
                          state.d_token_ids, B, H, embd_row_bytes, state.d_hidden);
 
   uint32_t full_attn_idx = 0;
@@ -378,32 +488,49 @@ void ForwardModelGpuChunk(
   for (uint32_t l = 0; l < cfg.num_layers; ++l) {
     const auto& layer = weights.layers[l];
     // Pre-attention RMSNorm: [B, H] -> d_x_normed
-    DispatchRMSNormBatch(stream, state.d_hidden, layer.attn_norm.data, layer.attn_norm.type,
+    DispatchRMSNormBatch(main, state.d_hidden, layer.attn_norm.data, layer.attn_norm.type,
                          cfg.rms_eps, H, B, state.d_x_normed);
 
     if (layer.is_full_attention) {
-      // Full Attention projections
-      DispatchGemm(stream, layer.attn_q.data, layer.attn_q.type, 0, 0,
+      if (has_side) {
+        (void)hipEventRecord(state.side_start, main);
+        (void)hipStreamWaitEvent(side, state.side_start, 0);
+
+        // K and V projections on side stream
+        DispatchGemm(side, layer.attn_k.data, layer.attn_k.type, 0, 0,
+                     state.d_x_normed, state.d_k_buf, cfg.num_kv_heads * cfg.head_dim, H, B);
+        DispatchGemm(side, layer.attn_v.data, layer.attn_v.type, 0, 0,
+                     state.d_x_normed, state.d_v_buf, cfg.num_kv_heads * cfg.head_dim, H, B);
+        (void)hipEventRecord(state.side_done, side);
+      } else {
+        DispatchGemm(main, layer.attn_k.data, layer.attn_k.type, 0, 0,
+                     state.d_x_normed, state.d_k_buf, cfg.num_kv_heads * cfg.head_dim, H, B);
+        DispatchGemm(main, layer.attn_v.data, layer.attn_v.type, 0, 0,
+                     state.d_x_normed, state.d_v_buf, cfg.num_kv_heads * cfg.head_dim, H, B);
+      }
+
+      // Full Attention Q projection on main stream
+      DispatchGemm(main, layer.attn_q.data, layer.attn_q.type, 0, 0,
                    state.d_x_normed, state.d_qg_buf, 2 * cfg.num_heads * cfg.head_dim, H, B);
-      DispatchGemm(stream, layer.attn_k.data, layer.attn_k.type, 0, 0,
-                   state.d_x_normed, state.d_k_buf, cfg.num_kv_heads * cfg.head_dim, H, B);
-      DispatchGemm(stream, layer.attn_v.data, layer.attn_v.type, 0, 0,
-                   state.d_x_normed, state.d_v_buf, cfg.num_kv_heads * cfg.head_dim, H, B);
 
       // Unpack Q and Gate
-      DispatchUnpackQGBatch(stream, state.d_qg_buf, cfg.num_heads, cfg.head_dim, B,
+      DispatchUnpackQGBatch(main, state.d_qg_buf, cfg.num_heads, cfg.head_dim, B,
                             state.d_q_buf, state.d_gate_buf);
 
       // Q-norm and RoPE
-      DispatchRMSNormBatch(stream, state.d_q_buf, layer.attn_q_norm.data, layer.attn_q_norm.type,
+      DispatchRMSNormBatch(main, state.d_q_buf, layer.attn_q_norm.data, layer.attn_q_norm.type,
                            cfg.rms_eps, cfg.head_dim, B * cfg.num_heads, state.d_q_buf);
-      DispatchRoPEBatch(stream, state.d_q_buf, cfg.rotary_dim, cfg.head_dim, cfg.num_heads,
+      DispatchRoPEBatch(main, state.d_q_buf, cfg.rotary_dim, cfg.head_dim, cfg.num_heads,
                         pos0, B, cfg.rope_theta);
 
+      if (has_side) {
+        (void)hipStreamWaitEvent(main, state.side_done, 0);
+      }
+
       // K-norm and RoPE
-      DispatchRMSNormBatch(stream, state.d_k_buf, layer.attn_k_norm.data, layer.attn_k_norm.type,
+      DispatchRMSNormBatch(main, state.d_k_buf, layer.attn_k_norm.data, layer.attn_k_norm.type,
                            cfg.rms_eps, cfg.head_dim, B * cfg.num_kv_heads, state.d_k_buf);
-      DispatchRoPEBatch(stream, state.d_k_buf, cfg.rotary_dim, cfg.head_dim, cfg.num_kv_heads,
+      DispatchRoPEBatch(main, state.d_k_buf, cfg.rotary_dim, cfg.head_dim, cfg.num_kv_heads,
                         pos0, B, cfg.rope_theta);
 
       // Store in KV cache
@@ -411,16 +538,16 @@ void ForwardModelGpuChunk(
                           (static_cast<size_t>(full_attn_idx) * cfg.num_kv_heads * state.max_context * cfg.head_dim);
       float* layer_kv_v = state.d_kv_v +
                           (static_cast<size_t>(full_attn_idx) * cfg.num_kv_heads * state.max_context * cfg.head_dim);
-      DispatchStoreKVBatch(stream, state.d_k_buf, state.d_v_buf, cfg.num_kv_heads, cfg.head_dim,
+      DispatchStoreKVBatch(main, state.d_k_buf, state.d_v_buf, cfg.num_kv_heads, cfg.head_dim,
                            state.max_context, pos0, B, layer_kv_k, layer_kv_v);
 
       // Causal Attention Prefill
-      DispatchAttentionPrefill(stream, state.d_q_buf, state.d_gate_buf, layer_kv_k, layer_kv_v,
+      DispatchAttentionPrefill(main, state.d_q_buf, state.d_gate_buf, layer_kv_k, layer_kv_v,
                                cfg.num_heads, cfg.num_kv_heads, cfg.head_dim, state.max_context,
                                pos0, B, state.d_context);
 
       // Output projection: [num_heads * head_dim -> H]
-      DispatchGemm(stream, layer.attn_output.data, layer.attn_output.type, 0, 0,
+      DispatchGemm(main, layer.attn_output.data, layer.attn_output.type, 0, 0,
                    state.d_context, state.d_attn_out, H, cfg.num_heads * cfg.head_dim, B);
 
       ++full_attn_idx;
@@ -432,20 +559,40 @@ void ForwardModelGpuChunk(
       const uint32_t k_heads = cfg.ssm_num_k_heads;
       const uint32_t ssm_head_dim = cfg.ssm_head_dim;
 
-      DispatchGemm(stream, layer.ssm_qkv.data, layer.ssm_qkv.type, 0, 0,
+      if (has_side) {
+        (void)hipEventRecord(state.side_start, main);
+        (void)hipStreamWaitEvent(side, state.side_start, 0);
+
+        // Side stream computes gate, alpha, beta GEMMs
+        DispatchGemm(side, layer.ssm_gate.data, layer.ssm_gate.type, 0, 0,
+                     state.d_x_normed, state.d_ssm_gate, val_dim, H, B);
+        DispatchGemm(side, layer.ssm_alpha.data, layer.ssm_alpha.type, 0, 0,
+                     state.d_x_normed, state.d_ssm_alpha, v_heads, H, B);
+        DispatchGemm(side, layer.ssm_beta.data, layer.ssm_beta.type, 0, 0,
+                     state.d_x_normed, state.d_ssm_beta, v_heads, H, B);
+        (void)hipEventRecord(state.side_done, side);
+      } else {
+        DispatchGemm(main, layer.ssm_gate.data, layer.ssm_gate.type, 0, 0,
+                     state.d_x_normed, state.d_ssm_gate, val_dim, H, B);
+        DispatchGemm(main, layer.ssm_alpha.data, layer.ssm_alpha.type, 0, 0,
+                     state.d_x_normed, state.d_ssm_alpha, v_heads, H, B);
+        DispatchGemm(main, layer.ssm_beta.data, layer.ssm_beta.type, 0, 0,
+                     state.d_x_normed, state.d_ssm_beta, v_heads, H, B);
+      }
+
+      // Main stream computes ssm_qkv GEMM
+      DispatchGemm(main, layer.ssm_qkv.data, layer.ssm_qkv.type, 0, 0,
                    state.d_x_normed, state.d_ssm_qkv, conv_channels, H, B);
-      DispatchGemm(stream, layer.ssm_gate.data, layer.ssm_gate.type, 0, 0,
-                   state.d_x_normed, state.d_ssm_gate, val_dim, H, B);
-      DispatchGemm(stream, layer.ssm_alpha.data, layer.ssm_alpha.type, 0, 0,
-                   state.d_x_normed, state.d_ssm_alpha, v_heads, H, B);
-      DispatchGemm(stream, layer.ssm_beta.data, layer.ssm_beta.type, 0, 0,
-                   state.d_x_normed, state.d_ssm_beta, v_heads, H, B);
+
+      if (has_side) {
+        (void)hipStreamWaitEvent(main, state.side_done, 0);
+      }
 
       float* layer_conv_state = state.d_conv_state + (static_cast<size_t>(ssm_layer_idx) * 3 * conv_channels);
       float* layer_deltanet_state =
           state.d_deltanet_state + (static_cast<size_t>(ssm_layer_idx) * v_heads * ssm_head_dim * ssm_head_dim);
 
-      // Sequential recurrence on stream (pure async GPU queue)
+      // Sequential recurrence on main stream (pure async GPU queue)
       for (uint32_t t = 0; t < B; ++t) {
         const float* t_ssm_qkv = state.d_ssm_qkv + (static_cast<size_t>(t) * conv_channels);
         const float* t_ssm_gate = state.d_ssm_gate + (static_cast<size_t>(t) * val_dim);
@@ -454,7 +601,7 @@ void ForwardModelGpuChunk(
         float* t_core_out = state.d_ssm_core_out + (static_cast<size_t>(t) * val_dim);
 
         DispatchSsmStep(
-            stream, t_ssm_qkv, t_ssm_gate, t_ssm_alpha, t_ssm_beta,
+            main, t_ssm_qkv, t_ssm_gate, t_ssm_alpha, t_ssm_beta,
             layer.ssm_dt.data, layer.ssm_a.data, layer.ssm_conv1d.data, layer.ssm_norm.data,
             conv_channels, v_heads, k_heads, ssm_head_dim, cfg.rms_eps,
             layer_conv_state, layer_deltanet_state,
@@ -462,26 +609,68 @@ void ForwardModelGpuChunk(
             state.d_ssm_q_normed, state.d_ssm_k_normed, t_core_out);
       }
 
-      DispatchGemm(stream, layer.ssm_out.data, layer.ssm_out.type, 0, 0,
+      DispatchGemm(main, layer.ssm_out.data, layer.ssm_out.type, 0, 0,
                    state.d_ssm_core_out, state.d_attn_out, H, val_dim, B);
 
       ++ssm_layer_idx;
     }
 
     // Residual add: d_hidden += d_attn_out across all B tokens
-    DispatchResidualAdd(stream, state.d_attn_out, B * H, state.d_hidden);
+    DispatchResidualAdd(main, state.d_attn_out, B * H, state.d_hidden);
 
     // Post-attention RMSNorm: d_hidden -> d_x_normed
-    DispatchRMSNormBatch(stream, state.d_hidden, layer.post_attention_norm.data, layer.post_attention_norm.type,
+    DispatchRMSNormBatch(main, state.d_hidden, layer.post_attention_norm.data, layer.post_attention_norm.type,
                          cfg.rms_eps, H, B, state.d_x_normed);
 
-    // MoE Routing & FFN
-    // 1. Router GEMM for all B tokens: [B, H] -> [B, num_experts]
-    DispatchGemm(stream, layer.ffn_gate_inp.data, layer.ffn_gate_inp.type, 0, 0,
+    // MoE Routing & FFN with Shared Expert Overlap
+    if (has_side) {
+      (void)hipEventRecord(state.side_start, main);
+      (void)hipStreamWaitEvent(side, state.side_start, 0);
+
+      // Shared expert evaluated for all B tokens in one batched GEMM on side stream
+      DispatchGemm(side, layer.ffn_gate_shexp.data, layer.ffn_gate_shexp.type, 0, 0,
+                   state.d_x_normed, state.d_shexp_gate, cfg.shared_expert_ff, H, B);
+      DispatchGemm(side, layer.ffn_up_shexp.data, layer.ffn_up_shexp.type, 0, 0,
+                   state.d_x_normed, state.d_shexp_up, cfg.shared_expert_ff, H, B);
+
+      DispatchSiluMul(side, state.d_shexp_gate, state.d_shexp_up, B * cfg.shared_expert_ff, state.d_shexp_act);
+
+      DispatchGemm(side, layer.ffn_down_shexp.data, layer.ffn_down_shexp.type, 0, 0,
+                   state.d_shexp_act, state.d_shexp_down, H, cfg.shared_expert_ff, B);
+
+      // Shared expert gating dot product
+      if (!layer.ffn_gate_inp_shexp.empty()) {
+        DispatchGemm(side, layer.ffn_gate_inp_shexp.data, layer.ffn_gate_inp_shexp.type, 0, 0,
+                     state.d_x_normed, state.d_shexp_dot, 1, H, B);
+      } else {
+        (void)hipMemsetAsync(state.d_shexp_dot, 0, B * sizeof(float), side);
+      }
+      (void)hipEventRecord(state.side_done, side);
+    } else {
+      DispatchGemm(main, layer.ffn_gate_shexp.data, layer.ffn_gate_shexp.type, 0, 0,
+                   state.d_x_normed, state.d_shexp_gate, cfg.shared_expert_ff, H, B);
+      DispatchGemm(main, layer.ffn_up_shexp.data, layer.ffn_up_shexp.type, 0, 0,
+                   state.d_x_normed, state.d_shexp_up, cfg.shared_expert_ff, H, B);
+
+      DispatchSiluMul(main, state.d_shexp_gate, state.d_shexp_up, B * cfg.shared_expert_ff, state.d_shexp_act);
+
+      DispatchGemm(main, layer.ffn_down_shexp.data, layer.ffn_down_shexp.type, 0, 0,
+                   state.d_shexp_act, state.d_shexp_down, H, cfg.shared_expert_ff, B);
+
+      if (!layer.ffn_gate_inp_shexp.empty()) {
+        DispatchGemm(main, layer.ffn_gate_inp_shexp.data, layer.ffn_gate_inp_shexp.type, 0, 0,
+                     state.d_x_normed, state.d_shexp_dot, 1, H, B);
+      } else {
+        (void)hipMemsetAsync(state.d_shexp_dot, 0, B * sizeof(float), main);
+      }
+    }
+
+    // Router GEMM on main stream
+    DispatchGemm(main, layer.ffn_gate_inp.data, layer.ffn_gate_inp.type, 0, 0,
                  state.d_x_normed, state.d_router_logits, cfg.num_experts, H, B);
 
     // On-device Top-K selection (zero host sync, zero roundtrips!)
-    DispatchRouterSoftmaxTopK(stream, state.d_router_logits, cfg.num_experts,
+    DispatchRouterSoftmaxTopK(main, state.d_router_logits, cfg.num_experts,
                               cfg.num_experts_used, B, state.d_expert_ids, state.d_expert_weights);
 
     const uint64_t expert_stride_gate = layer.ffn_gate_exps.RowBytes() * cfg.expert_ff;
@@ -490,55 +679,40 @@ void ForwardModelGpuChunk(
 
     // Batched Gated SwiGLU: executes Gate + Up + SiLU-Mul for ALL tokens and ALL experts in ONE kernel launch!
     DispatchMoeGatedSwigluBatch(
-        stream, layer.ffn_gate_exps.data, layer.ffn_up_exps.data, layer.ffn_gate_exps.type,
+        main, layer.ffn_gate_exps.data, layer.ffn_up_exps.data, layer.ffn_gate_exps.type,
         expert_stride_gate, expert_stride_up, state.d_x_normed, state.d_expert_ids,
         B, cfg.num_experts_used, cfg.expert_ff, H, state.d_expert_act);
 
     // Batched Down Projection & Weighted Accumulation for ALL tokens and ALL experts in ONE kernel launch!
     DispatchMoeDownAccumBatch(
-        stream, layer.ffn_down_exps.data, layer.ffn_down_exps.type,
+        main, layer.ffn_down_exps.data, layer.ffn_down_exps.type,
         expert_stride_down, state.d_expert_act, state.d_expert_weights, state.d_expert_ids,
         B, cfg.num_experts_used, cfg.expert_ff, H, state.d_routed_accum);
 
-    // Shared expert evaluated for all B tokens in one batched GEMM
-    DispatchGemm(stream, layer.ffn_gate_shexp.data, layer.ffn_gate_shexp.type, 0, 0,
-                 state.d_x_normed, state.d_shexp_gate, cfg.shared_expert_ff, H, B);
-    DispatchGemm(stream, layer.ffn_up_shexp.data, layer.ffn_up_shexp.type, 0, 0,
-                 state.d_x_normed, state.d_shexp_up, cfg.shared_expert_ff, H, B);
-
-    DispatchSiluMul(stream, state.d_shexp_gate, state.d_shexp_up, B * cfg.shared_expert_ff, state.d_shexp_act);
-
-    DispatchGemm(stream, layer.ffn_down_shexp.data, layer.ffn_down_shexp.type, 0, 0,
-                 state.d_shexp_act, state.d_shexp_down, H, cfg.shared_expert_ff, B);
-
-    // Shared expert gating dot product
-    if (!layer.ffn_gate_inp_shexp.empty()) {
-      DispatchGemm(stream, layer.ffn_gate_inp_shexp.data, layer.ffn_gate_inp_shexp.type, 0, 0,
-                   state.d_x_normed, state.d_shexp_dot, 1, H, B);
-    } else {
-      (void)hipMemsetAsync(state.d_shexp_dot, 0, B * sizeof(float), stream);
+    if (has_side) {
+      (void)hipStreamWaitEvent(main, state.side_done, 0);
     }
 
     // Combine routed + shared expert (directly on device, zero CPU sync!)
-    DispatchMoECombineSharedBatch(stream, state.d_routed_accum, state.d_shexp_down, state.d_shexp_dot, H, B, state.d_moe_out);
+    DispatchMoECombineSharedBatch(main, state.d_routed_accum, state.d_shexp_down, state.d_shexp_dot, H, B, state.d_moe_out);
 
     // Residual add: d_hidden += d_moe_out
-    DispatchResidualAdd(stream, state.d_moe_out, B * H, state.d_hidden);
+    DispatchResidualAdd(main, state.d_moe_out, B * H, state.d_hidden);
   }
 
   // Final Output Norm & LM Head (for the last token of chunk, if requested)
   if (!out_logits.empty()) {
     const float* last_hidden = state.d_hidden + (static_cast<size_t>(B - 1) * H);
-    DispatchRMSNorm(stream, last_hidden, weights.output_norm.data, weights.output_norm.type,
+    DispatchRMSNorm(main, last_hidden, weights.output_norm.data, weights.output_norm.type,
                     cfg.rms_eps, H, state.d_x_normed);
 
-    DispatchGemv(stream, weights.output.data, weights.output.type, 0, 0,
+    DispatchGemv(main, weights.output.data, weights.output.type, 0, 0,
                  state.d_x_normed, state.d_logits, cfg.vocab_size, H);
 
-    (void)hipMemcpyDtoHAsync(out_logits.data(), state.d_logits, cfg.vocab_size * sizeof(float), stream);
-    (void)hipStreamSynchronize(stream);
+    (void)hipMemcpyDtoHAsync(out_logits.data(), state.d_logits, cfg.vocab_size * sizeof(float), main);
+    (void)hipStreamSynchronize(main);
   } else {
-    (void)hipStreamSynchronize(stream);
+    (void)hipStreamSynchronize(main);
   }
 
   auto t_chunk_end = std::chrono::high_resolution_clock::now();

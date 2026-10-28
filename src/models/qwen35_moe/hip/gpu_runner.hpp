@@ -20,6 +20,12 @@ struct GpuState {
   static constexpr uint32_t kMaxChunk{4096};
   uint32_t* d_token_ids{nullptr};
 
+  // Streams & Events for concurrent multi-queue execution (Compute 0 + 3D overlap)
+  hipStream_t main_stream{nullptr};
+  hipStream_t side_stream{nullptr};
+  hipEvent_t side_start{nullptr};
+  hipEvent_t side_done{nullptr};
+
   // Residual and activations
   float* d_hidden{nullptr};
   float* d_x_normed{nullptr};
