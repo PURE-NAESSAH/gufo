@@ -110,6 +110,19 @@ endif()
 
 if (ENGINE_ENABLE_HIP)
   enable_language(HIP)
+  if (WIN32)
+    # CMake does not define MSVC runtime library options for HIP with clang-cl
+    set(CMAKE_HIP_COMPILE_OPTIONS_MSVC_RUNTIME_LIBRARY_MultiThreaded         -MT)
+    set(CMAKE_HIP_COMPILE_OPTIONS_MSVC_RUNTIME_LIBRARY_MultiThreadedDLL      -MD)
+    set(CMAKE_HIP_COMPILE_OPTIONS_MSVC_RUNTIME_LIBRARY_MultiThreadedDebug    -MTd)
+    set(CMAKE_HIP_COMPILE_OPTIONS_MSVC_RUNTIME_LIBRARY_MultiThreadedDebugDLL -MDd)
+    set(CMAKE_HIP_COMPILE_OPTIONS_MSVC_DEBUG_INFORMATION_FORMAT_Embedded        -Z7)
+    set(CMAKE_HIP_COMPILE_OPTIONS_MSVC_DEBUG_INFORMATION_FORMAT_ProgramDatabase -Zi)
+    # CMake's Windows-Clang-HIP.cmake adds -TP (force C++) which breaks HIP kernel compilation on clang-cl.
+    string(REPLACE " -TP" "" CMAKE_HIP_COMPILE_OBJECT "${CMAKE_HIP_COMPILE_OBJECT}")
+    string(REPLACE "-TP " "" CMAKE_HIP_COMPILE_OBJECT "${CMAKE_HIP_COMPILE_OBJECT}")
+    string(REPLACE "-TP" "" CMAKE_HIP_COMPILE_OBJECT "${CMAKE_HIP_COMPILE_OBJECT}")
+  endif()
   # clang-cl compiles HIP like C++ on Windows, so ccache covers it there.
   if (GUFO_CCACHE_CLANG_CL)
     set(CMAKE_HIP_COMPILER_LAUNCHER "${GUFO_CCACHE_PROGRAM}")

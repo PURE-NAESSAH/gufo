@@ -20,5 +20,11 @@ endif()
 set(CMAKE_C_COMPILER "${GUFO_CLANG_CL}")
 set(CMAKE_CXX_COMPILER "${GUFO_CLANG_CL}")
 set(CMAKE_HIP_COMPILER "${GUFO_CLANG_CL}")
+# CMake ≤ 3.31: Windows-MSVC.cmake's MSVC_VERSION fallback chain does not
+# include CMAKE_HIP_SIMULATE_VERSION, so the HIP ABI try-compile always
+# fatals on clang-cl.  Since clang-cl is the same compiler for C, CXX and
+# HIP, the ABI detected for C/CXX is correct for HIP; skip the broken probe.
+set(CMAKE_HIP_COMPILER_FORCED TRUE)
 list(APPEND CMAKE_PREFIX_PATH "${GUFO_HIP_ROOT}")
 set(ROCM_PATH "${GUFO_HIP_ROOT}" CACHE PATH "HIP runtime root")
+
