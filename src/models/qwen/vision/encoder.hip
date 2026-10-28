@@ -390,7 +390,7 @@ struct Encoder::Impl {
     expect("clip.vision.attention.head_count", kHeads);
     expect("clip.vision.spatial_merge_size", 2);
     expect("clip.vision.image_size", 768);
-    if ((width != 5120 && width != 2560) ||
+    if ((width != 5120 && width != 2560 && width != 3072) ||
         reader->GetMetadataString("general.architecture") != "clip" ||
         reader->GetMetadataString("general.type") != "mmproj" ||
         reader->GetMetadataBool("clip.has_vision_encoder") != true ||
@@ -398,7 +398,7 @@ struct Encoder::Impl {
         reader->GetMetadataFloat32(
             "clip.vision.attention.layer_norm_epsilon") != 1e-6F) {
       throw std::invalid_argument(
-          "vision sidecar does not match the Qwen3.8 model");
+          "vision sidecar does not match the Qwen model");
     }
     for (const auto key : {"clip.vision.image_mean", "clip.vision.image_std"}) {
       const auto* value = reader->FindMetadata(key);
