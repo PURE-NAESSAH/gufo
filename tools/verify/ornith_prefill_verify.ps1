@@ -1,6 +1,7 @@
 # Ornith-1.5-122B prefill optimization verification (run when GPU is free).
 # Usage: powershell -ExecutionPolicy Bypass -File tools\verify\ornith_prefill_verify.ps1
-# Expect ~8 model loads (~3 min each load + work). Logs: build\verify_logs\<timestamp>\*.txt
+# All runs use `prompt` (native qwen35_moe engine; `bench` lacks qwen35_moe support).
+# Logs: build\verify_logs\<timestamp>\*.txt  (~5-10 min warm, longer if page cache cold)
 $ErrorActionPreference = 'Continue'
 $repo  = 'D:\GIT\gufo'
 $new   = Join-Path $repo 'build\windows-release\gufo.exe'
@@ -34,19 +35,26 @@ function Step {
   Add-Content $sum ("  exit={0} wall={1}s out={2}" -f $code, [math]::Round($sw.Elapsed.TotalSeconds,1), $out)
 }
 
+function PromptStep {
+  param([string]$Name, [string]$Exe, [string]$Fixture, [string]$N)
+  Step $Name $Exe @('prompt','-m',$model,'-f',(Join-Path $fx $Fixture),'-n',$N,'-t','0','-s','42','--think','on','-v')
+}
+
 Add-Content $sum "ornith_prefill_verify started $(Get-Date -Format o)"
 Add-Content $sum "new=$new`nold=$old`nmodel=$model"
 if (-not (Test-Path $model)) { Add-Content $sum "FATAL: model missing"; exit 1 }
 
-Step '00_diagnose'            $new @('diagnose')
-Step '01_new_bench_validate'  $new @('bench','-m',$model,'-p','531,2658','-n','0','-r','1','--validate-prefill','512','-v')
-Step '02_old_bench'           $old @('bench','-m',$model,'-p','531,2658','-n','0','-r','1','-v')
-Step '03_new_prompt_en'       $new @('prompt','-m',$model,'-f',(Join-Path $fx 'prompt_en.txt'),'-n','96','-t','0','-s','42','--think','on','-v')
-Step '04_old_prompt_en'       $old @('prompt','-m',$model,'-f',(Join-Path $fx 'prompt_en.txt'),'-n','96','-t','0','-s','42','--think','on','-v')
-Step '05_new_prompt_fr'       $new @('prompt','-m',$model,'-f',(Join-Path $fx 'prompt_fr.txt'),'-n','96','-t','0','-s','42','--think','on','-v')
-Step '06_old_prompt_fr'       $old @('prompt','-m',$model,'-f',(Join-Path $fx 'prompt_fr.txt'),'-n','96','-t','0','-s','42','--think','on','-v')
-Step '07_new_prompt_long_fr'  $new @('prompt','-m',$model,'-f',(Join-Path $fx 'prompt_long_fr.txt'),'-n','96','-t','0','-s','42','--think','on','-v')
-Step '08_old_prompt_long_fr'  $old @('prompt','-m',$model,'-f',(Join-Path $fx 'prompt_long_fr.txt'),'-n','96','-t','0','-s','42','--think','on','-v')
+Step '00_diagnose' $new @('diagnose')
+PromptStep '01_new_timed_512'     $new 'timed_512.txt'  '1'
+PromptStep '02_old_timed_512'     $old 'timed_512.txt'  '1'
+PromptStep '03_new_timed_2658'    $new 'timed_2658.txt' '1'
+PromptStep '04_old_timed_2658'    $old 'timed_2658.txt' '1'
+PromptStep '05_new_context_3800'  $new 'timed_3800.txt' '24'
+PromptStep '06_old_context_3800'  $old 'timed_3800.txt' '24'
+PromptStep '07_new_prompt_en'     $new 'prompt_en.txt'  '96'
+PromptStep '08_old_prompt_en'     $old 'prompt_en.txt'  '96'
+PromptStep '09_new_prompt_fr'     $new 'prompt_fr.txt'  '96'
+PromptStep '10_old_prompt_fr'     $old 'prompt_fr.txt'  '96'
 
 Add-Content $sum ''
 Add-Content $sum 'ALL STEPS COMPLETE'
