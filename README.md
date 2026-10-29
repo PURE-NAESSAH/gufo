@@ -220,8 +220,38 @@ nix build
 
 ### Linux (Without Nix)
 
-Install GCC 14+, CMake 3.21+, Ninja, ROCm 10.1+ (HIP Clang, hipBLAS, hipBLASLt, rocWMMA):
+Install a C++20 compiler, CMake 3.21+, Ninja, pkg-config and the
+following development libraries. The pinned Nix toolchain uses GCC
+16.2 and ROCm 10.1.0 (HIP Clang 24). Attention and audio convolution kernels are compiled
+directly from HIP. Python, Triton/AOTriton, Composable Kernel and MIOpen are
+not production build or runtime requirements.
 
+| Dependency | Used for |
+| --- | --- |
+| ROCm HIP compiler/runtime, hipBLAS, hipBLASLt, rocBLAS | GPU execution and matrix multiplication |
+| hipCUB, rocPRIM, rocWMMA headers | Compiled GPU kernels |
+| ICU, libcurl, OpenSSL, libpng, libjpeg, libwebp | Tokenization, HTTPS, hashing and images |
+| FFmpeg development libraries | Video embedding decoding and RGB conversion |
+| libsndfile, libsoxr | Audio decoding and reference-compatible resampling |
+| FFmpeg and ffprobe | Video/audio output; invoked as separate executables |
+
+Install ROCm using [AMD's Linux instructions](https://rocm.docs.amd.com/projects/install-on-linux/en/latest/).
+Use the development packages for the libraries above. ROCm normally installs
+under `/opt/rocm`.
+
+For example, on Debian/Ubuntu the ordinary system libraries are:
+
+```sh
+sudo apt install build-essential cmake ninja-build pkg-config \
+  libicu-dev libcurl4-openssl-dev libssl-dev libpng-dev libjpeg-dev libwebp-dev \
+  libsndfile1-dev libsoxr-dev libavformat-dev libavcodec-dev libavutil-dev libswscale-dev ffmpeg
+
+# ROCm libraries from the table, named as AMD's repository ships them.
+sudo apt install hipblas-dev hipblaslt-dev rocblas-dev \
+  hipcub-dev rocprim-dev rocwmma-dev
+```
+
+Build Gufork:
 ```bash
 cmake --preset release -DCMAKE_INSTALL_PREFIX="$HOME/.local"
 cmake --build --preset release --parallel 8
