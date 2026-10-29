@@ -11,8 +11,53 @@
 #include "src/core/quant/ggml_dequant.hpp"
 #include "src/core/quant/hip/rocmfp4_hip_codebook.cuh"
 #include "src/core/quant/hip/rocmfp4_hip_scale.cuh"
+#include "src/models/qwen35_moe/hip/kernels.hpp"
 
 namespace gufo::models::qwen35_moe::hip {
+
+namespace {
+
+struct HipErrorRecord {
+  std::string message;
+  bool pending = false;
+};
+
+HipErrorRecord& HipErrorSlot() {
+  static thread_local HipErrorRecord record;
+  return record;
+}
+
+}  // namespace
+
+void NoteHipFailure(std::string_view what, hipError_t status) {
+  if (status == hipSuccess) return;
+  // The last-error value is sticky per thread; consuming it here stops
+  // unrelated later calls from being blamed for this failure.
+  (void)hipGetLastError();
+  HipErrorRecord& record = HipErrorSlot();
+  if (record.pending) return;
+  record.pending = true;
+  record.message.assign(what);
+  record.message.append(": ");
+  record.message.append(hipGetErrorString(status));
+}
+
+bool TakeHipError(std::string* out) {
+  HipErrorRecord& record = HipErrorSlot();
+  if (!record.pending) return false;
+  record.pending = false;
+  if (out != nullptr) out->swap(record.message);
+  record.message.clear();
+  return true;
+}
+
+void ResetHipError() noexcept {
+  HipErrorRecord& record = HipErrorSlot();
+  record.pending = false;
+  record.message.clear();
+}
+
+bool HipErrorPending() noexcept { return HipErrorSlot().pending; }
 
 // Pure ALU Codebook10 decoding (Zero memory lookup, 100% vectorizable)
 __device__ __forceinline__ int8_t Rocmfp4DecodeNibble(uint8_t q) {
@@ -336,27 +381,33 @@ void DispatchGemv(
     case core::GgmlType::kQ4_0_ROCMFP4_FAST:
       GemvRocmFp4FastKernel<kWaves><<<grid_dim, block_dim, 0, stream>>>(
           A_data, x, y, M, K, expert_stride, expert_id);
+      GUFO_QWEN35_HIP_LAUNCH("gemv_rocmfp4_fast");
       break;
     case core::GgmlType::kQ4_0_ROCMFP4:
       GemvRocmFp4Kernel<kWaves><<<grid_dim, block_dim, 0, stream>>>(
           A_data, x, y, M, K, expert_stride, expert_id);
+      GUFO_QWEN35_HIP_LAUNCH("gemv_rocmfp4");
       break;
     case core::GgmlType::kBF16:
       GemvBF16Kernel<kWaves><<<grid_dim, block_dim, 0, stream>>>(
           A_data, x, y, M, K, expert_stride, expert_id);
+      GUFO_QWEN35_HIP_LAUNCH("gemv_bf16");
       break;
     case core::GgmlType::kF16:
       GemvF16Kernel<kWaves><<<grid_dim, block_dim, 0, stream>>>(
           A_data, x, y, M, K, expert_stride, expert_id);
+      GUFO_QWEN35_HIP_LAUNCH("gemv_f16");
       break;
     case core::GgmlType::kQ8_0:
       GemvQ8_0Kernel<kWaves><<<grid_dim, block_dim, 0, stream>>>(
           A_data, x, y, M, K, expert_stride, expert_id);
+      GUFO_QWEN35_HIP_LAUNCH("gemv_q8_0");
       break;
     case core::GgmlType::kF32:
     default:
       GemvF32Kernel<kWaves><<<grid_dim, block_dim, 0, stream>>>(
           A_data, x, y, M, K, expert_stride, expert_id);
+      GUFO_QWEN35_HIP_LAUNCH("gemv_f32");
       break;
   }
 }
@@ -442,6 +493,7 @@ void DispatchRMSNorm(
     uint32_t size,
     float* out) {
   RMSNormKernel<<<1, 256, 0, stream>>>(x, weight_data, weight_type, eps, size, out);
+  GUFO_QWEN35_HIP_LAUNCH("rmsnorm");
 }
 
 // ---------------------------------------------------------------------------
@@ -510,6 +562,7 @@ void DispatchEmbedding(
   const uint32_t grid_dim = (hidden_size + block_dim - 1) / block_dim;
   EmbeddingKernel<<<grid_dim, block_dim, 0, stream>>>(
       table, type, token_id, hidden_size, row_bytes, out);
+  GUFO_QWEN35_HIP_LAUNCH("embedding");
 }
 
 // ---------------------------------------------------------------------------
@@ -551,6 +604,7 @@ void DispatchRoPE(
     float theta_base) {
   RoPEKernel<<<num_heads, rotary_dim / 2, 0, stream>>>(
       vec, rotary_dim, head_dim, num_heads, pos, theta_base);
+  GUFO_QWEN35_HIP_LAUNCH("rope");
 }
 
 // ---------------------------------------------------------------------------
@@ -580,6 +634,7 @@ void DispatchUnpackQG(
     float* q_buf,
     float* gate_buf) {
   UnpackQGKernel<<<num_heads, head_dim, 0, stream>>>(qg, num_heads, head_dim, q_buf, gate_buf);
+  GUFO_QWEN35_HIP_LAUNCH("unpack_qg");
 }
 
 // ---------------------------------------------------------------------------
@@ -681,6 +736,7 @@ void DispatchAttentionDecode(
     float* context_out) {
   AttentionDecodeKernel<<<num_heads, head_dim, 0, stream>>>(
       q_buf, gate_buf, kv_k, kv_v, num_heads, num_kv_heads, head_dim, max_context, pos, context_out);
+  GUFO_QWEN35_HIP_LAUNCH("attention_decode");
 }
 
 // ---------------------------------------------------------------------------
@@ -720,6 +776,7 @@ void DispatchStoreKV(
     float* kv_v) {
   StoreKVKernel<<<num_kv_heads, head_dim, 0, stream>>>(
       k_in, v_in, num_kv_heads, head_dim, max_context, pos, kv_k, kv_v);
+  GUFO_QWEN35_HIP_LAUNCH("store_kv");
 }
 
 // ---------------------------------------------------------------------------
@@ -951,12 +1008,14 @@ void DispatchSsmStep(
   // 1. Alpha & Beta
   SsmAlphaBetaKernel<<<1, v_heads, 0, stream>>>(
       ssm_alpha, ssm_beta, dt_bias, a_val, v_heads, decay_scratch, beta_sig_scratch);
+  GUFO_QWEN35_HIP_LAUNCH("ssm_alpha_beta");
 
   // 2. Conv1D
   const uint32_t conv_block = 256;
   const uint32_t conv_grid = (conv_channels + conv_block - 1) / conv_block;
   SsmConv1DKernel<<<conv_grid, conv_block, 0, stream>>>(
       ssm_qkv, conv1d_w, conv_channels, conv_state, conv_out_scratch);
+  GUFO_QWEN35_HIP_LAUNCH("ssm_conv1d");
 
   // 3. Head L2-norm
   const float* q_raw = conv_out_scratch;
@@ -964,11 +1023,13 @@ void DispatchSsmStep(
   const float* v_raw = conv_out_scratch + (2 * k_heads * head_dim);
   SsmHeadNormKernel<<<k_heads, head_dim, 0, stream>>>(
       q_raw, k_raw, k_heads, head_dim, eps, q_normed_scratch, k_normed_scratch);
+  GUFO_QWEN35_HIP_LAUNCH("ssm_head_norm");
 
   // 4. Recurrence
   SsmRecurrenceKernel<<<v_heads, head_dim, 0, stream>>>(
       q_normed_scratch, k_normed_scratch, v_raw, decay_scratch, beta_sig_scratch,
       ssm_gate, ssm_norm_w, v_heads, k_heads, head_dim, eps, deltanet_state, core_out);
+  GUFO_QWEN35_HIP_LAUNCH("ssm_recurrence");
 }
 
 __global__ void SsmConv1DChunkKernel(
@@ -1211,23 +1272,27 @@ void DispatchSsmChunk(
   const uint32_t conv_grid = (conv_channels + conv_block - 1) / conv_block;
   SsmConv1DChunkKernel<<<conv_grid, conv_block, 0, stream>>>(
       ssm_qkv, conv1d_w, conv_channels, B, conv_state, conv_out_buf);
+  GUFO_QWEN35_HIP_LAUNCH("ssm_conv1d_chunk");
 
   // 2. Batched AlphaBeta for all B tokens
   const uint32_t ab_block = 64;
   const uint32_t ab_grid = (v_heads + ab_block - 1) / ab_block;
   SsmAlphaBetaChunkKernel<<<ab_grid, ab_block, 0, stream>>>(
       ssm_alpha, ssm_beta, dt_bias, a_val, v_heads, B, decay_buf, beta_sig_buf);
+  GUFO_QWEN35_HIP_LAUNCH("ssm_alpha_beta_chunk");
 
   // 3. Batched HeadNorm for all B tokens
   const dim3 norm_grid(k_heads, B);
   SsmHeadNormChunkKernel<<<norm_grid, head_dim, 0, stream>>>(
       conv_out_buf, conv_channels, k_heads, head_dim, B, eps, q_normed_buf, k_normed_buf);
+  GUFO_QWEN35_HIP_LAUNCH("ssm_head_norm_chunk");
 
   // 4. Batched Recurrence for all B tokens in one kernel
   SsmRecurrenceChunkKernel<<<v_heads, head_dim, 0, stream>>>(
       q_normed_buf, k_normed_buf, conv_out_buf, conv_channels,
       decay_buf, beta_sig_buf, ssm_gate, ssm_norm_w,
       v_heads, k_heads, head_dim, B, eps, deltanet_state, core_out);
+  GUFO_QWEN35_HIP_LAUNCH("ssm_recurrence_chunk");
 }
 
 // ---------------------------------------------------------------------------
@@ -1248,6 +1313,7 @@ void DispatchSiluMul(hipStream_t stream, const float* gate, const float* up, uin
   const uint32_t block_dim = 256;
   const uint32_t grid_dim = (size + block_dim - 1) / block_dim;
   SiluMulKernel<<<grid_dim, block_dim, 0, stream>>>(gate, up, size, act);
+  GUFO_QWEN35_HIP_LAUNCH("silu_mul");
 }
 
 __global__ void AccumWeightedKernel(
@@ -1264,6 +1330,7 @@ void DispatchAccumWeighted(hipStream_t stream, const float* src, float weight, u
   const uint32_t block_dim = 256;
   const uint32_t grid_dim = (size + block_dim - 1) / block_dim;
   AccumWeightedKernel<<<grid_dim, block_dim, 0, stream>>>(src, weight, size, dst);
+  GUFO_QWEN35_HIP_LAUNCH("accum_weighted");
 }
 
 __global__ void MoECombineSharedKernel(
@@ -1287,6 +1354,7 @@ void DispatchMoECombineShared(
   const uint32_t block_dim = 256;
   const uint32_t grid_dim = (size + block_dim - 1) / block_dim;
   MoECombineSharedKernel<<<grid_dim, block_dim, 0, stream>>>(routed, shexp, shexp_gate_dot, size, out);
+  GUFO_QWEN35_HIP_LAUNCH("moe_combine_shared");
 }
 
 __global__ void ResidualAddKernel(const float* __restrict__ delta, uint32_t size, float* __restrict__ hidden) {
@@ -1299,6 +1367,7 @@ void DispatchResidualAdd(hipStream_t stream, const float* delta, uint32_t size, 
   const uint32_t block_dim = 256;
   const uint32_t grid_dim = (size + block_dim - 1) / block_dim;
   ResidualAddKernel<<<grid_dim, block_dim, 0, stream>>>(delta, size, hidden);
+  GUFO_QWEN35_HIP_LAUNCH("residual_add");
 }
 
 // ---------------------------------------------------------------------------
@@ -2246,12 +2315,14 @@ void DispatchGemm(
         GemmWmmaRocmFp4FastKernel<BM, BN, WM, WN><<<grid, WM * WN * 32, 0,
                                                     stream>>>(A_data, x, y, B,
                                                                M, K);
+        GUFO_QWEN35_HIP_LAUNCH("gemm_wmma_rocmfp4_fast");
         break;
       }
       constexpr uint32_t T_BATCH = 32;
       const dim3 grid_dim_t((M + kWaves - 1) / kWaves, (B + T_BATCH - 1) / T_BATCH);
       GemmLdsRocmFp4FastKernel<kWaves, T_BATCH><<<grid_dim_t, block_dim, 0, stream>>>(
           A_data, x, y, M, K, B, expert_stride, expert_id);
+      GUFO_QWEN35_HIP_LAUNCH("gemm_lds_rocmfp4_fast");
       break;
     }
     case core::GgmlType::kQ4_0_ROCMFP4: {
@@ -2259,24 +2330,28 @@ void DispatchGemm(
       const dim3 grid_dim_t((M + kWaves - 1) / kWaves, (B + T_BATCH - 1) / T_BATCH);
       GemmLdsRocmFp4Kernel<kWaves, T_BATCH><<<grid_dim_t, block_dim, 0, stream>>>(
           A_data, x, y, M, K, B, expert_stride, expert_id);
+      GUFO_QWEN35_HIP_LAUNCH("gemm_lds_rocmfp4");
       break;
     }
     case core::GgmlType::kBF16: {
       const dim3 grid_dim((M + kWaves - 1) / kWaves, B);
       GemmTileBF16Kernel<kWaves><<<grid_dim, block_dim, 0, stream>>>(
           A_data, x, y, M, K, B, expert_stride, expert_id);
+      GUFO_QWEN35_HIP_LAUNCH("gemm_tile_bf16");
       break;
     }
     case core::GgmlType::kF16: {
       const dim3 grid_dim((M + kWaves - 1) / kWaves, B);
       GemmTileF16Kernel<kWaves><<<grid_dim, block_dim, 0, stream>>>(
           A_data, x, y, M, K, B, expert_stride, expert_id);
+      GUFO_QWEN35_HIP_LAUNCH("gemm_tile_f16");
       break;
     }
     case core::GgmlType::kQ8_0: {
       const dim3 grid_dim((M + kWaves - 1) / kWaves, B);
       GemmTileQ8_0Kernel<kWaves><<<grid_dim, block_dim, 0, stream>>>(
           A_data, x, y, M, K, B, expert_stride, expert_id);
+      GUFO_QWEN35_HIP_LAUNCH("gemm_tile_q8_0");
       break;
     }
     default:
@@ -2373,6 +2448,7 @@ void DispatchRMSNormBatch(
   }
   dim3 grid(1, B);
   RMSNormBatchKernel<<<grid, 256, 0, stream>>>(x, weight_data, weight_type, eps, size, out);
+  GUFO_QWEN35_HIP_LAUNCH("rmsnorm_batch");
 }
 
 __global__ void EmbeddingBatchKernel(
@@ -2440,6 +2516,7 @@ void DispatchEmbeddingBatch(
   dim3 grid(grid_x, B);
   EmbeddingBatchKernel<<<grid, block_dim, 0, stream>>>(
       table, type, token_ids, hidden_size, row_bytes, out);
+  GUFO_QWEN35_HIP_LAUNCH("embedding_batch");
 }
 
 __global__ void RoPEBatchKernel(
@@ -2484,6 +2561,7 @@ void DispatchRoPEBatch(
   dim3 grid(grid_x, num_heads, B);
   RoPEBatchKernel<<<grid, block_dim, 0, stream>>>(
       vec, rotary_dim, head_dim, num_heads, pos0, theta_base);
+  GUFO_QWEN35_HIP_LAUNCH("rope_batch");
 }
 
 __global__ void UnpackQGBatchKernel(
@@ -2521,6 +2599,7 @@ void DispatchUnpackQGBatch(
   const uint32_t grid_dim = (total + block_dim - 1) / block_dim;
   UnpackQGBatchKernel<<<grid_dim, block_dim, 0, stream>>>(
       qg, num_heads, head_dim, B, q_buf, gate_buf);
+  GUFO_QWEN35_HIP_LAUNCH("unpack_qg_batch");
 }
 
 __global__ void StoreKVBatchKernel(
@@ -2560,6 +2639,7 @@ void DispatchStoreKVBatch(
   dim3 grid(num_kv_heads, B);
   StoreKVBatchKernel<<<grid, head_dim, 0, stream>>>(
       k_in, v_in, num_kv_heads, head_dim, max_context, pos0, kv_k, kv_v);
+  GUFO_QWEN35_HIP_LAUNCH("store_kv_batch");
 }
 
 __global__ void AttentionPrefillKernel(
@@ -2827,11 +2907,13 @@ void DispatchAttentionPrefill(
     AttentionPrefillTiledKernel<<<grid, 512, 0, stream>>>(
         q_buf, gate_buf, kv_k, kv_v, num_heads, num_kv_heads,
         max_context, pos0, B, context_out);
+    GUFO_QWEN35_HIP_LAUNCH("attention_prefill_tiled");
     return;
   }
   dim3 grid(num_heads, B);
   AttentionPrefillKernel<<<grid, head_dim, 0, stream>>>(
       q_buf, gate_buf, kv_k, kv_v, num_heads, num_kv_heads, head_dim, max_context, pos0, context_out);
+  GUFO_QWEN35_HIP_LAUNCH("attention_prefill");
 }
 
 __global__ void MoECombineSharedBatchKernel(
@@ -2865,6 +2947,7 @@ void DispatchMoECombineSharedBatch(
   const uint32_t grid_dim = (total + block_dim - 1) / block_dim;
   MoECombineSharedBatchKernel<<<grid_dim, block_dim, 0, stream>>>(
       routed, shexp, d_shexp_gate_dot, H, B, out);
+  GUFO_QWEN35_HIP_LAUNCH("moe_combine_shared_batch");
 }
 
 // ---------------------------------------------------------------------------
@@ -3048,6 +3131,7 @@ void DispatchMoeGatedSwigluBatch(
   MoeGatedSwigluFastKernel<kWaves><<<grid_dim, block_dim, 0, stream>>>(
       gate_data, up_data, expert_stride_gate, expert_stride_up,
       x, expert_ids, B, num_experts_used, expert_ff, H, act_out);
+  GUFO_QWEN35_HIP_LAUNCH("moe_gated_swiglu_batch");
 }
 
 void DispatchMoeDownAccumBatch(
@@ -3071,6 +3155,7 @@ void DispatchMoeDownAccumBatch(
   MoeDownAccumFastKernel<kWaves><<<grid_dim, block_dim, 0, stream>>>(
       down_data, expert_stride_down, act_in, expert_weights, expert_ids,
       B, num_experts_used, expert_ff, H, routed_accum);
+  GUFO_QWEN35_HIP_LAUNCH("moe_down_accum_batch");
 }
 
 __global__ void MoeCountExpertsKernel(
@@ -3153,9 +3238,13 @@ void DispatchSortMoESlots(
   const uint32_t grid_dim = (total_slots + block_dim - 1) / block_dim;
 
   MoeCountExpertsKernel<<<grid_dim, block_dim, 0, stream>>>(expert_ids, counts, total_slots);
+  GUFO_QWEN35_HIP_LAUNCH("moe_count_experts");
   MoePrefixSumOffsetsKernel<<<1, 32, 0, stream>>>(counts, offsets, num_experts);
+  GUFO_QWEN35_HIP_LAUNCH("moe_prefix_sum_offsets");
   MoeScatterSlotsKernel<<<grid_dim, block_dim, 0, stream>>>(expert_ids, offsets, cursors, sorted_slots, total_slots);
+  GUFO_QWEN35_HIP_LAUNCH("moe_scatter_slots");
   MoeBuildTilesKernel<<<1, 32, 0, stream>>>(counts, tile_expert, tile_tok_offset, num_tiles_out, num_experts);
+  GUFO_QWEN35_HIP_LAUNCH("moe_build_tiles");
 }
 
 template <uint32_t WavesPerBlock = 8, uint32_t T_BATCH = 16>
@@ -3409,6 +3498,7 @@ void DispatchMoeGatedSwigluGrouped(
         counts, const_cast<uint32_t*>(tile_expert),
         const_cast<uint32_t*>(tile_tok_offset),
         const_cast<uint32_t*>(num_tiles_out), num_experts);
+    GUFO_QWEN35_HIP_LAUNCH("moe_build_tiles_wmma");
     const uint32_t max_tiles = std::min(
         8192u, (B * num_experts_used + BN - 1u) / BN + num_experts);
     const dim3 grid_dim((expert_ff + BM - 1) / BM, max_tiles);
@@ -3418,6 +3508,7 @@ void DispatchMoeGatedSwigluGrouped(
             nullptr, counts, offsets, sorted_slots, tile_expert,
             tile_tok_offset, num_tiles_out, num_experts_used, expert_ff, H,
             act_out);
+    GUFO_QWEN35_HIP_LAUNCH("moe_gemm_wmma_gateup");
     return;
   }
   constexpr uint32_t kWaves = 8;
@@ -3431,6 +3522,7 @@ void DispatchMoeGatedSwigluGrouped(
       x, counts, offsets, sorted_slots,
       tile_expert, tile_tok_offset, num_tiles_out,
       B, num_experts, num_experts_used, expert_ff, H, act_out);
+  GUFO_QWEN35_HIP_LAUNCH("moe_gated_swiglu_grouped");
 }
 
 void DispatchMoeDownAccumGrouped(
@@ -3465,6 +3557,7 @@ void DispatchMoeDownAccumGrouped(
             expert_weights, counts, offsets, sorted_slots, tile_expert,
             tile_tok_offset, num_tiles_out, num_experts_used, expert_ff, H,
             routed_accum);
+    GUFO_QWEN35_HIP_LAUNCH("moe_gemm_wmma_down");
     return;
   }
   constexpr uint32_t kWaves = 8;
@@ -3478,6 +3571,7 @@ void DispatchMoeDownAccumGrouped(
       counts, offsets, sorted_slots,
       tile_expert, tile_tok_offset, num_tiles_out,
       B, num_experts, num_experts_used, expert_ff, H, routed_accum);
+  GUFO_QWEN35_HIP_LAUNCH("moe_down_accum_grouped");
 }
 
 __device__ __forceinline__ void WarpReduceMaxIdx(float& val, uint32_t& idx) {
@@ -3633,6 +3727,7 @@ void DispatchRouterSoftmaxTopK(
   if (B == 0 || num_experts == 0 || num_experts_used == 0) return;
   RouterSoftmaxTopKKernel<<<B, 256, 0, stream>>>(
       router_logits, num_experts, num_experts_used, B, expert_ids, expert_weights);
+  GUFO_QWEN35_HIP_LAUNCH("router_softmax_topk");
 }
 
 }  // namespace gufo::models::qwen35_moe::hip

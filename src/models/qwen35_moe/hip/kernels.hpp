@@ -5,10 +5,33 @@
 #include <hip/hip_runtime.h>
 #include <cstddef>
 #include <cstdint>
+#include <string>
+#include <string_view>
 
 #include "src/core/gguf_reader.hpp"
 
 namespace gufo::models::qwen35_moe::hip {
+
+// Thread-local record of the first HIP failure seen since the last
+// TakeHipError()/ResetHipError(). Every HIP result in this model funnels
+// through here so a dead GPU context cannot look like fast inference.
+void NoteHipFailure(std::string_view what, hipError_t status);
+
+// Moves out the pending message and clears it; false when nothing failed.
+[[nodiscard]] bool TakeHipError(std::string* out);
+
+void ResetHipError() noexcept;
+
+// True while a recorded failure is still waiting for its caller.
+[[nodiscard]] bool HipErrorPending() noexcept;
+
+#ifndef GUFO_QWEN35_HIP
+#define GUFO_QWEN35_HIP(expr) NoteHipFailure(#expr, (expr))
+#endif
+
+#ifndef GUFO_QWEN35_HIP_LAUNCH
+#define GUFO_QWEN35_HIP_LAUNCH(name) NoteHipFailure(name " launch", hipGetLastError())
+#endif
 
 void DispatchGemv(
     hipStream_t stream,

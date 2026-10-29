@@ -12,6 +12,7 @@
 
 #include "src/models/qwen35_moe/config.hpp"
 #include "src/models/qwen35_moe/weights.hpp"
+#include "src/models/qwen35_moe/hip/kernels.hpp"
 
 namespace gufo::models::qwen35_moe::hip {
 

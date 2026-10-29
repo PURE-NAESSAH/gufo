@@ -230,6 +230,15 @@ bool Session::Sync(std::span<const std::int32_t> prompt,
         model_->weights(),
         gpu_state_,
         out_logits);
+    std::string hip_err;
+    if (hip::TakeHipError(&hip_err)) {
+      if (error_msg) {
+        *error_msg = "Qwen 3.5 MoE prefill failed at pos " + std::to_string(i) +
+                     ": " + hip_err;
+      }
+      valid_ = false;
+      return false;
+    }
 
     for (std::size_t c = 0; c < chunk_n; ++c) {
       tokens_.push_back(prompt[i + c]);
@@ -272,6 +281,15 @@ bool Session::Evaluate(std::int32_t token, std::string* error_msg) {
 #if defined(ENGINE_ENABLE_HIP)
   hip::ForwardModelGpu(static_cast<std::uint32_t>(token), pos, model_->weights(),
                        gpu_state_, std::span<float>(logits_));
+  std::string hip_err;
+  if (hip::TakeHipError(&hip_err)) {
+    if (error_msg) {
+      *error_msg = "Qwen 3.5 MoE evaluate failed at pos " + std::to_string(pos) +
+                   ": " + hip_err;
+    }
+    valid_ = false;
+    return false;
+  }
 #else
   ForwardModel(static_cast<std::uint32_t>(token), pos, model_->weights(),
                kv_cache_, ssm_state_, scratch_, std::span<float>(logits_));

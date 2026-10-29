@@ -13,11 +13,16 @@ namespace gufo::models::qwen35_moe::hip {
 
 namespace {
 
-void* AllocBytes(size_t bytes, std::vector<void*>& record) {
+void* AllocBytes(std::string_view name, size_t bytes, std::vector<void*>& record) {
   void* ptr = nullptr;
   hipError_t status = gufo::hip::AllocateDevice(&ptr, bytes);
   if (status == hipSuccess && ptr != nullptr) {
     record.push_back(ptr);
+  } else {
+    std::fprintf(stderr, "[GpuState] %.*s allocation failed (%zu bytes): %s\n",
+                 static_cast<int>(name.size()), name.data(), bytes,
+                 hipGetErrorString(status));
+    NoteHipFailure(name, status != hipSuccess ? status : hipErrorMemoryAllocation);
   }
   return ptr;
 }
@@ -41,66 +46,66 @@ void GpuState::Allocate(const Config& cfg, uint32_t max_ctx) {
   const uint32_t full_layers = cfg.TotalFullAttentionLayers();
   const uint32_t ssm_layers = cfg.TotalSsmLayers();
 
-  d_hidden = static_cast<float*>(AllocBytes(kMaxChunk * H * sizeof(float), allocations));
-  d_x_normed = static_cast<float*>(AllocBytes(kMaxChunk * H * sizeof(float), allocations));
-  d_attn_out = static_cast<float*>(AllocBytes(kMaxChunk * H * sizeof(float), allocations));
-  d_token_ids = static_cast<uint32_t*>(AllocBytes(kMaxChunk * sizeof(uint32_t), allocations));
+  d_hidden = static_cast<float*>(AllocBytes("d_hidden", kMaxChunk * H * sizeof(float), allocations));
+  d_x_normed = static_cast<float*>(AllocBytes("d_x_normed", kMaxChunk * H * sizeof(float), allocations));
+  d_attn_out = static_cast<float*>(AllocBytes("d_attn_out", kMaxChunk * H * sizeof(float), allocations));
+  d_token_ids = static_cast<uint32_t*>(AllocBytes("d_token_ids", kMaxChunk * sizeof(uint32_t), allocations));
 
   // Full attention
-  d_qg_buf = static_cast<float*>(AllocBytes(kMaxChunk * 2 * num_heads * head_dim * sizeof(float), allocations));
-  d_q_buf = static_cast<float*>(AllocBytes(kMaxChunk * num_heads * head_dim * sizeof(float), allocations));
-  d_gate_buf = static_cast<float*>(AllocBytes(kMaxChunk * num_heads * head_dim * sizeof(float), allocations));
-  d_k_buf = static_cast<float*>(AllocBytes(kMaxChunk * num_kv_heads * head_dim * sizeof(float), allocations));
-  d_v_buf = static_cast<float*>(AllocBytes(kMaxChunk * num_kv_heads * head_dim * sizeof(float), allocations));
-  d_context = static_cast<float*>(AllocBytes(kMaxChunk * num_heads * head_dim * sizeof(float), allocations));
+  d_qg_buf = static_cast<float*>(AllocBytes("d_qg_buf", kMaxChunk * 2 * num_heads * head_dim * sizeof(float), allocations));
+  d_q_buf = static_cast<float*>(AllocBytes("d_q_buf", kMaxChunk * num_heads * head_dim * sizeof(float), allocations));
+  d_gate_buf = static_cast<float*>(AllocBytes("d_gate_buf", kMaxChunk * num_heads * head_dim * sizeof(float), allocations));
+  d_k_buf = static_cast<float*>(AllocBytes("d_k_buf", kMaxChunk * num_kv_heads * head_dim * sizeof(float), allocations));
+  d_v_buf = static_cast<float*>(AllocBytes("d_v_buf", kMaxChunk * num_kv_heads * head_dim * sizeof(float), allocations));
+  d_context = static_cast<float*>(AllocBytes("d_context", kMaxChunk * num_heads * head_dim * sizeof(float), allocations));
 
   const size_t kv_elements = static_cast<size_t>(full_layers) * num_kv_heads * max_context * head_dim;
-  d_kv_k = static_cast<float*>(AllocBytes(kv_elements * sizeof(float), allocations));
-  d_kv_v = static_cast<float*>(AllocBytes(kv_elements * sizeof(float), allocations));
+  d_kv_k = static_cast<float*>(AllocBytes("d_kv_k", kv_elements * sizeof(float), allocations));
+  d_kv_v = static_cast<float*>(AllocBytes("d_kv_v", kv_elements * sizeof(float), allocations));
 
   // SSM
-  d_ssm_qkv = static_cast<float*>(AllocBytes(kMaxChunk * conv_channels * sizeof(float), allocations));
-  d_ssm_gate = static_cast<float*>(AllocBytes(kMaxChunk * val_dim * sizeof(float), allocations));
-  d_ssm_alpha = static_cast<float*>(AllocBytes(kMaxChunk * v_heads * sizeof(float), allocations));
-  d_ssm_beta = static_cast<float*>(AllocBytes(kMaxChunk * v_heads * sizeof(float), allocations));
-  d_decay = static_cast<float*>(AllocBytes(kMaxChunk * v_heads * sizeof(float), allocations));
-  d_beta_sig = static_cast<float*>(AllocBytes(kMaxChunk * v_heads * sizeof(float), allocations));
-  d_ssm_conv_out = static_cast<float*>(AllocBytes(kMaxChunk * conv_channels * sizeof(float), allocations));
-  d_ssm_q_normed = static_cast<float*>(AllocBytes(kMaxChunk * cfg.SsmKeyDim() * sizeof(float), allocations));
-  d_ssm_k_normed = static_cast<float*>(AllocBytes(kMaxChunk * cfg.SsmKeyDim() * sizeof(float), allocations));
-  d_ssm_core_out = static_cast<float*>(AllocBytes(kMaxChunk * val_dim * sizeof(float), allocations));
+  d_ssm_qkv = static_cast<float*>(AllocBytes("d_ssm_qkv", kMaxChunk * conv_channels * sizeof(float), allocations));
+  d_ssm_gate = static_cast<float*>(AllocBytes("d_ssm_gate", kMaxChunk * val_dim * sizeof(float), allocations));
+  d_ssm_alpha = static_cast<float*>(AllocBytes("d_ssm_alpha", kMaxChunk * v_heads * sizeof(float), allocations));
+  d_ssm_beta = static_cast<float*>(AllocBytes("d_ssm_beta", kMaxChunk * v_heads * sizeof(float), allocations));
+  d_decay = static_cast<float*>(AllocBytes("d_decay", kMaxChunk * v_heads * sizeof(float), allocations));
+  d_beta_sig = static_cast<float*>(AllocBytes("d_beta_sig", kMaxChunk * v_heads * sizeof(float), allocations));
+  d_ssm_conv_out = static_cast<float*>(AllocBytes("d_ssm_conv_out", kMaxChunk * conv_channels * sizeof(float), allocations));
+  d_ssm_q_normed = static_cast<float*>(AllocBytes("d_ssm_q_normed", kMaxChunk * cfg.SsmKeyDim() * sizeof(float), allocations));
+  d_ssm_k_normed = static_cast<float*>(AllocBytes("d_ssm_k_normed", kMaxChunk * cfg.SsmKeyDim() * sizeof(float), allocations));
+  d_ssm_core_out = static_cast<float*>(AllocBytes("d_ssm_core_out", kMaxChunk * val_dim * sizeof(float), allocations));
 
   const size_t conv_elements = static_cast<size_t>(ssm_layers) * 3 * conv_channels;
-  d_conv_state = static_cast<float*>(AllocBytes(conv_elements * sizeof(float), allocations));
+  d_conv_state = static_cast<float*>(AllocBytes("d_conv_state", conv_elements * sizeof(float), allocations));
 
   const size_t deltanet_elements = static_cast<size_t>(ssm_layers) * v_heads * ssm_head_dim * ssm_head_dim;
-  d_deltanet_state = static_cast<float*>(AllocBytes(deltanet_elements * sizeof(float), allocations));
+  d_deltanet_state = static_cast<float*>(AllocBytes("d_deltanet_state", deltanet_elements * sizeof(float), allocations));
 
   // MoE
-  d_router_logits = static_cast<float*>(AllocBytes(kMaxChunk * cfg.num_experts * sizeof(float), allocations));
-  d_expert_gate = static_cast<float*>(AllocBytes(expert_ff * sizeof(float), allocations));
-  d_expert_up = static_cast<float*>(AllocBytes(expert_ff * sizeof(float), allocations));
-  d_expert_act = static_cast<float*>(AllocBytes(kMaxChunk * cfg.num_experts_used * expert_ff * sizeof(float), allocations));
-  d_expert_down = static_cast<float*>(AllocBytes(H * sizeof(float), allocations));
-  d_routed_accum = static_cast<float*>(AllocBytes(kMaxChunk * H * sizeof(float), allocations));
-  d_expert_ids = static_cast<uint32_t*>(AllocBytes(kMaxChunk * cfg.num_experts_used * sizeof(uint32_t), allocations));
-  d_expert_weights = static_cast<float*>(AllocBytes(kMaxChunk * cfg.num_experts_used * sizeof(float), allocations));
-  d_expert_counts = static_cast<uint32_t*>(AllocBytes(cfg.num_experts * sizeof(uint32_t), allocations));
-  d_expert_offsets = static_cast<uint32_t*>(AllocBytes((cfg.num_experts + 1) * sizeof(uint32_t), allocations));
-  d_expert_cursors = static_cast<uint32_t*>(AllocBytes(cfg.num_experts * sizeof(uint32_t), allocations));
-  d_sorted_slots = static_cast<uint32_t*>(AllocBytes(kMaxChunk * cfg.num_experts_used * sizeof(uint32_t), allocations));
-  d_tok_tile_expert = static_cast<uint32_t*>(AllocBytes(8192 * sizeof(uint32_t), allocations));
-  d_tok_tile_offset = static_cast<uint32_t*>(AllocBytes(8192 * sizeof(uint32_t), allocations));
-  d_num_tiles = static_cast<uint32_t*>(AllocBytes(sizeof(uint32_t), allocations));
-  d_shexp_gate = static_cast<float*>(AllocBytes(kMaxChunk * shared_expert_ff * sizeof(float), allocations));
-  d_shexp_up = static_cast<float*>(AllocBytes(kMaxChunk * shared_expert_ff * sizeof(float), allocations));
-  d_shexp_act = static_cast<float*>(AllocBytes(kMaxChunk * shared_expert_ff * sizeof(float), allocations));
-  d_shexp_down = static_cast<float*>(AllocBytes(kMaxChunk * H * sizeof(float), allocations));
-  d_shexp_dot = static_cast<float*>(AllocBytes(kMaxChunk * sizeof(float), allocations));
-  d_moe_out = static_cast<float*>(AllocBytes(kMaxChunk * H * sizeof(float), allocations));
+  d_router_logits = static_cast<float*>(AllocBytes("d_router_logits", kMaxChunk * cfg.num_experts * sizeof(float), allocations));
+  d_expert_gate = static_cast<float*>(AllocBytes("d_expert_gate", expert_ff * sizeof(float), allocations));
+  d_expert_up = static_cast<float*>(AllocBytes("d_expert_up", expert_ff * sizeof(float), allocations));
+  d_expert_act = static_cast<float*>(AllocBytes("d_expert_act", kMaxChunk * cfg.num_experts_used * expert_ff * sizeof(float), allocations));
+  d_expert_down = static_cast<float*>(AllocBytes("d_expert_down", H * sizeof(float), allocations));
+  d_routed_accum = static_cast<float*>(AllocBytes("d_routed_accum", kMaxChunk * H * sizeof(float), allocations));
+  d_expert_ids = static_cast<uint32_t*>(AllocBytes("d_expert_ids", kMaxChunk * cfg.num_experts_used * sizeof(uint32_t), allocations));
+  d_expert_weights = static_cast<float*>(AllocBytes("d_expert_weights", kMaxChunk * cfg.num_experts_used * sizeof(float), allocations));
+  d_expert_counts = static_cast<uint32_t*>(AllocBytes("d_expert_counts", cfg.num_experts * sizeof(uint32_t), allocations));
+  d_expert_offsets = static_cast<uint32_t*>(AllocBytes("d_expert_offsets", (cfg.num_experts + 1) * sizeof(uint32_t), allocations));
+  d_expert_cursors = static_cast<uint32_t*>(AllocBytes("d_expert_cursors", cfg.num_experts * sizeof(uint32_t), allocations));
+  d_sorted_slots = static_cast<uint32_t*>(AllocBytes("d_sorted_slots", kMaxChunk * cfg.num_experts_used * sizeof(uint32_t), allocations));
+  d_tok_tile_expert = static_cast<uint32_t*>(AllocBytes("d_tok_tile_expert", 8192 * sizeof(uint32_t), allocations));
+  d_tok_tile_offset = static_cast<uint32_t*>(AllocBytes("d_tok_tile_offset", 8192 * sizeof(uint32_t), allocations));
+  d_num_tiles = static_cast<uint32_t*>(AllocBytes("d_num_tiles", sizeof(uint32_t), allocations));
+  d_shexp_gate = static_cast<float*>(AllocBytes("d_shexp_gate", kMaxChunk * shared_expert_ff * sizeof(float), allocations));
+  d_shexp_up = static_cast<float*>(AllocBytes("d_shexp_up", kMaxChunk * shared_expert_ff * sizeof(float), allocations));
+  d_shexp_act = static_cast<float*>(AllocBytes("d_shexp_act", kMaxChunk * shared_expert_ff * sizeof(float), allocations));
+  d_shexp_down = static_cast<float*>(AllocBytes("d_shexp_down", kMaxChunk * H * sizeof(float), allocations));
+  d_shexp_dot = static_cast<float*>(AllocBytes("d_shexp_dot", kMaxChunk * sizeof(float), allocations));
+  d_moe_out = static_cast<float*>(AllocBytes("d_moe_out", kMaxChunk * H * sizeof(float), allocations));
 
   // Logits
-  d_logits = static_cast<float*>(AllocBytes(cfg.vocab_size * sizeof(float), allocations));
+  d_logits = static_cast<float*>(AllocBytes("d_logits", cfg.vocab_size * sizeof(float), allocations));
 
   h_router_logits.resize(kMaxChunk * cfg.num_experts, 0.0f);
   h_probs.resize(cfg.num_experts);
@@ -122,10 +127,10 @@ void GpuState::Allocate(const Config& cfg, uint32_t max_ctx) {
     }
   }
   if (side_start == nullptr) {
-    (void)hipEventCreateWithFlags(&side_start, hipEventDisableTiming);
+    GUFO_QWEN35_HIP(hipEventCreateWithFlags(&side_start, hipEventDisableTiming));
   }
   if (side_done == nullptr) {
-    (void)hipEventCreateWithFlags(&side_done, hipEventDisableTiming);
+    GUFO_QWEN35_HIP(hipEventCreateWithFlags(&side_done, hipEventDisableTiming));
   }
 
   Reset(cfg, max_ctx);
@@ -214,21 +219,21 @@ void GpuState::Reset(const Config& cfg, uint32_t max_ctx) {
 
   if (d_conv_state != nullptr) {
     const size_t conv_elements = static_cast<size_t>(ssm_layers) * 3 * conv_channels;
-    (void)hipMemsetAsync(d_conv_state, 0, conv_elements * sizeof(float), main_stream);
+    GUFO_QWEN35_HIP(hipMemsetAsync(d_conv_state, 0, conv_elements * sizeof(float), main_stream));
   }
   if (d_deltanet_state != nullptr) {
     const size_t deltanet_elements = static_cast<size_t>(ssm_layers) * v_heads * ssm_head_dim * ssm_head_dim;
-    (void)hipMemsetAsync(d_deltanet_state, 0, deltanet_elements * sizeof(float), main_stream);
+    GUFO_QWEN35_HIP(hipMemsetAsync(d_deltanet_state, 0, deltanet_elements * sizeof(float), main_stream));
   }
   if (d_kv_k != nullptr && d_kv_v != nullptr) {
     const size_t kv_elements = static_cast<size_t>(full_layers) * cfg.num_kv_heads * max_context * cfg.head_dim;
-    (void)hipMemsetAsync(d_kv_k, 0, kv_elements * sizeof(float), main_stream);
-    (void)hipMemsetAsync(d_kv_v, 0, kv_elements * sizeof(float), main_stream);
+    GUFO_QWEN35_HIP(hipMemsetAsync(d_kv_k, 0, kv_elements * sizeof(float), main_stream));
+    GUFO_QWEN35_HIP(hipMemsetAsync(d_kv_v, 0, kv_elements * sizeof(float), main_stream));
   }
   if (main_stream != nullptr) {
-    (void)hipStreamSynchronize(main_stream);
+    GUFO_QWEN35_HIP(hipStreamSynchronize(main_stream));
   } else {
-    (void)hipDeviceSynchronize();
+    GUFO_QWEN35_HIP(hipDeviceSynchronize());
   }
 }
 
@@ -238,6 +243,7 @@ void ForwardModelGpu(
     const ModelWeights& weights,
     GpuState& state,
     std::span<float> out_logits) {
+  ResetHipError();
   const hipStream_t main = state.main_stream;
   const hipStream_t side = (state.side_stream != nullptr) ? state.side_stream : main;
   const bool has_side = (state.side_stream != nullptr && state.side_start != nullptr && state.side_done != nullptr);
@@ -260,15 +266,15 @@ void ForwardModelGpu(
 
     if (layer.is_full_attention) {
       if (has_side) {
-        (void)hipEventRecord(state.side_start, main);
-        (void)hipStreamWaitEvent(side, state.side_start, 0);
+        GUFO_QWEN35_HIP(hipEventRecord(state.side_start, main));
+        GUFO_QWEN35_HIP(hipStreamWaitEvent(side, state.side_start, 0));
 
         // K and V projections on side stream
         DispatchGemv(side, layer.attn_k.data, layer.attn_k.type, 0, 0,
                      state.d_x_normed, state.d_k_buf, cfg.num_kv_heads * cfg.head_dim, H);
         DispatchGemv(side, layer.attn_v.data, layer.attn_v.type, 0, 0,
                      state.d_x_normed, state.d_v_buf, cfg.num_kv_heads * cfg.head_dim, H);
-        (void)hipEventRecord(state.side_done, side);
+        GUFO_QWEN35_HIP(hipEventRecord(state.side_done, side));
       } else {
         DispatchGemv(main, layer.attn_k.data, layer.attn_k.type, 0, 0,
                      state.d_x_normed, state.d_k_buf, cfg.num_kv_heads * cfg.head_dim, H);
@@ -290,7 +296,7 @@ void ForwardModelGpu(
       DispatchRoPE(main, state.d_q_buf, cfg.rotary_dim, cfg.head_dim, cfg.num_heads, pos, cfg.rope_theta);
 
       if (has_side) {
-        (void)hipStreamWaitEvent(main, state.side_done, 0);
+        GUFO_QWEN35_HIP(hipStreamWaitEvent(main, state.side_done, 0));
       }
 
       // K-norm and RoPE
@@ -325,8 +331,8 @@ void ForwardModelGpu(
       const uint32_t ssm_head_dim = cfg.ssm_head_dim;
 
       if (has_side) {
-        (void)hipEventRecord(state.side_start, main);
-        (void)hipStreamWaitEvent(side, state.side_start, 0);
+        GUFO_QWEN35_HIP(hipEventRecord(state.side_start, main));
+        GUFO_QWEN35_HIP(hipStreamWaitEvent(side, state.side_start, 0));
 
         // Side stream computes gate, alpha, beta in parallel
         DispatchGemv(side, layer.ssm_gate.data, layer.ssm_gate.type, 0, 0,
@@ -335,7 +341,7 @@ void ForwardModelGpu(
                      state.d_x_normed, state.d_ssm_alpha, v_heads, H);
         DispatchGemv(side, layer.ssm_beta.data, layer.ssm_beta.type, 0, 0,
                      state.d_x_normed, state.d_ssm_beta, v_heads, H);
-        (void)hipEventRecord(state.side_done, side);
+        GUFO_QWEN35_HIP(hipEventRecord(state.side_done, side));
       } else {
         DispatchGemv(main, layer.ssm_gate.data, layer.ssm_gate.type, 0, 0,
                      state.d_x_normed, state.d_ssm_gate, val_dim, H);
@@ -350,7 +356,7 @@ void ForwardModelGpu(
                    state.d_x_normed, state.d_ssm_qkv, conv_channels, H);
 
       if (has_side) {
-        (void)hipStreamWaitEvent(main, state.side_done, 0);
+        GUFO_QWEN35_HIP(hipStreamWaitEvent(main, state.side_done, 0));
       }
 
       float* layer_conv_state = state.d_conv_state + (static_cast<size_t>(ssm_layer_idx) * 3 * conv_channels);
@@ -380,8 +386,8 @@ void ForwardModelGpu(
 
     // MoE Routing & FFN with Shared Expert Overlap
     if (has_side) {
-      (void)hipEventRecord(state.side_start, main);
-      (void)hipStreamWaitEvent(side, state.side_start, 0);
+      GUFO_QWEN35_HIP(hipEventRecord(state.side_start, main));
+      GUFO_QWEN35_HIP(hipStreamWaitEvent(side, state.side_start, 0));
 
       // Shared expert evaluated in parallel on side stream
       DispatchGemv(side, layer.ffn_gate_shexp.data, layer.ffn_gate_shexp.type, 0, 0,
@@ -399,9 +405,9 @@ void ForwardModelGpu(
         DispatchGemv(side, layer.ffn_gate_inp_shexp.data, layer.ffn_gate_inp_shexp.type, 0, 0,
                      state.d_x_normed, state.d_shexp_dot, 1, H);
       } else {
-        (void)hipMemsetAsync(state.d_shexp_dot, 0, sizeof(float), side);
+        GUFO_QWEN35_HIP(hipMemsetAsync(state.d_shexp_dot, 0, sizeof(float), side));
       }
-      (void)hipEventRecord(state.side_done, side);
+      GUFO_QWEN35_HIP(hipEventRecord(state.side_done, side));
     } else {
       DispatchGemv(main, layer.ffn_gate_shexp.data, layer.ffn_gate_shexp.type, 0, 0,
                    state.d_x_normed, state.d_shexp_gate, cfg.shared_expert_ff, H);
@@ -417,7 +423,7 @@ void ForwardModelGpu(
         DispatchGemv(main, layer.ffn_gate_inp_shexp.data, layer.ffn_gate_inp_shexp.type, 0, 0,
                      state.d_x_normed, state.d_shexp_dot, 1, H);
       } else {
-        (void)hipMemsetAsync(state.d_shexp_dot, 0, sizeof(float), main);
+        GUFO_QWEN35_HIP(hipMemsetAsync(state.d_shexp_dot, 0, sizeof(float), main));
       }
     }
 
@@ -445,7 +451,7 @@ void ForwardModelGpu(
         1, cfg.num_experts_used, cfg.expert_ff, H, state.d_routed_accum);
 
     if (has_side) {
-      (void)hipStreamWaitEvent(main, state.side_done, 0);
+      GUFO_QWEN35_HIP(hipStreamWaitEvent(main, state.side_done, 0));
     }
 
     // Combine routed + shared expert
@@ -453,6 +459,9 @@ void ForwardModelGpu(
 
     // Residual add: d_hidden += d_moe_out
     DispatchResidualAdd(main, state.d_moe_out, H, state.d_hidden);
+    if (HipErrorPending()) {
+      break;
+    }
   }
 
   // Final Output Norm & LM Head (if out_logits requested)
@@ -463,10 +472,10 @@ void ForwardModelGpu(
     DispatchGemv(main, weights.output.data, weights.output.type, 0, 0,
                  state.d_x_normed, state.d_logits, cfg.vocab_size, H);
 
-    (void)hipMemcpyDtoHAsync(out_logits.data(), state.d_logits, cfg.vocab_size * sizeof(float), main);
-    (void)hipStreamSynchronize(main);
+    GUFO_QWEN35_HIP(hipMemcpyDtoHAsync(out_logits.data(), state.d_logits, cfg.vocab_size * sizeof(float), main));
+    GUFO_QWEN35_HIP(hipStreamSynchronize(main));
   } else {
-    (void)hipStreamSynchronize(main);
+    GUFO_QWEN35_HIP(hipStreamSynchronize(main));
   }
 }
 
@@ -484,7 +493,7 @@ void ForwardModelGpuChunk(
     ForwardModelGpu(tokens[0], pos0, weights, state, out_logits);
     return;
   }
-
+  ResetHipError();
   auto t_chunk_start = std::chrono::high_resolution_clock::now();
   const auto& cfg = weights.config;
   const uint32_t H = cfg.hidden_size;
@@ -493,7 +502,7 @@ void ForwardModelGpuChunk(
   const bool has_side = (state.side_stream != nullptr && state.side_start != nullptr && state.side_done != nullptr);
 
   // 1. Copy tokens to device and dispatch batched embedding
-  (void)hipMemcpyHtoDAsync(state.d_token_ids, tokens.data(), B * sizeof(uint32_t), main);
+  GUFO_QWEN35_HIP(hipMemcpyHtoDAsync(state.d_token_ids, tokens.data(), B * sizeof(uint32_t), main));
   const size_t embd_row_bytes = weights.token_embd.RowBytes();
   DispatchEmbeddingBatch(main, weights.token_embd.data, weights.token_embd.type,
                          state.d_token_ids, B, H, embd_row_bytes, state.d_hidden);
@@ -509,15 +518,15 @@ void ForwardModelGpuChunk(
 
     if (layer.is_full_attention) {
       if (has_side) {
-        (void)hipEventRecord(state.side_start, main);
-        (void)hipStreamWaitEvent(side, state.side_start, 0);
+        GUFO_QWEN35_HIP(hipEventRecord(state.side_start, main));
+        GUFO_QWEN35_HIP(hipStreamWaitEvent(side, state.side_start, 0));
 
         // K and V projections on side stream
         DispatchGemm(side, layer.attn_k.data, layer.attn_k.type, 0, 0,
                      state.d_x_normed, state.d_k_buf, cfg.num_kv_heads * cfg.head_dim, H, B);
         DispatchGemm(side, layer.attn_v.data, layer.attn_v.type, 0, 0,
                      state.d_x_normed, state.d_v_buf, cfg.num_kv_heads * cfg.head_dim, H, B);
-        (void)hipEventRecord(state.side_done, side);
+        GUFO_QWEN35_HIP(hipEventRecord(state.side_done, side));
       } else {
         DispatchGemm(main, layer.attn_k.data, layer.attn_k.type, 0, 0,
                      state.d_x_normed, state.d_k_buf, cfg.num_kv_heads * cfg.head_dim, H, B);
@@ -540,7 +549,7 @@ void ForwardModelGpuChunk(
                         pos0, B, cfg.rope_theta);
 
       if (has_side) {
-        (void)hipStreamWaitEvent(main, state.side_done, 0);
+        GUFO_QWEN35_HIP(hipStreamWaitEvent(main, state.side_done, 0));
       }
 
       // K-norm and RoPE
@@ -576,8 +585,8 @@ void ForwardModelGpuChunk(
       const uint32_t ssm_head_dim = cfg.ssm_head_dim;
 
       if (has_side) {
-        (void)hipEventRecord(state.side_start, main);
-        (void)hipStreamWaitEvent(side, state.side_start, 0);
+        GUFO_QWEN35_HIP(hipEventRecord(state.side_start, main));
+        GUFO_QWEN35_HIP(hipStreamWaitEvent(side, state.side_start, 0));
 
         // Side stream computes gate, alpha, beta GEMMs
         DispatchGemm(side, layer.ssm_gate.data, layer.ssm_gate.type, 0, 0,
@@ -586,7 +595,7 @@ void ForwardModelGpuChunk(
                      state.d_x_normed, state.d_ssm_alpha, v_heads, H, B);
         DispatchGemm(side, layer.ssm_beta.data, layer.ssm_beta.type, 0, 0,
                      state.d_x_normed, state.d_ssm_beta, v_heads, H, B);
-        (void)hipEventRecord(state.side_done, side);
+        GUFO_QWEN35_HIP(hipEventRecord(state.side_done, side));
       } else {
         DispatchGemm(main, layer.ssm_gate.data, layer.ssm_gate.type, 0, 0,
                      state.d_x_normed, state.d_ssm_gate, val_dim, H, B);
@@ -601,7 +610,7 @@ void ForwardModelGpuChunk(
                    state.d_x_normed, state.d_ssm_qkv, conv_channels, H, B);
 
       if (has_side) {
-        (void)hipStreamWaitEvent(main, state.side_done, 0);
+        GUFO_QWEN35_HIP(hipStreamWaitEvent(main, state.side_done, 0));
       }
 
       float* layer_conv_state = state.d_conv_state + (static_cast<size_t>(ssm_layer_idx) * 3 * conv_channels);
@@ -631,8 +640,8 @@ void ForwardModelGpuChunk(
 
     // MoE Routing & FFN with Shared Expert Overlap
     if (has_side) {
-      (void)hipEventRecord(state.side_start, main);
-      (void)hipStreamWaitEvent(side, state.side_start, 0);
+      GUFO_QWEN35_HIP(hipEventRecord(state.side_start, main));
+      GUFO_QWEN35_HIP(hipStreamWaitEvent(side, state.side_start, 0));
 
       // Shared expert evaluated for all B tokens in one batched GEMM on side stream
       DispatchGemm(side, layer.ffn_gate_shexp.data, layer.ffn_gate_shexp.type, 0, 0,
@@ -650,9 +659,9 @@ void ForwardModelGpuChunk(
         DispatchGemm(side, layer.ffn_gate_inp_shexp.data, layer.ffn_gate_inp_shexp.type, 0, 0,
                      state.d_x_normed, state.d_shexp_dot, 1, H, B);
       } else {
-        (void)hipMemsetAsync(state.d_shexp_dot, 0, B * sizeof(float), side);
+        GUFO_QWEN35_HIP(hipMemsetAsync(state.d_shexp_dot, 0, B * sizeof(float), side));
       }
-      (void)hipEventRecord(state.side_done, side);
+      GUFO_QWEN35_HIP(hipEventRecord(state.side_done, side));
     } else {
       DispatchGemm(main, layer.ffn_gate_shexp.data, layer.ffn_gate_shexp.type, 0, 0,
                    state.d_x_normed, state.d_shexp_gate, cfg.shared_expert_ff, H, B);
@@ -668,7 +677,7 @@ void ForwardModelGpuChunk(
         DispatchGemm(main, layer.ffn_gate_inp_shexp.data, layer.ffn_gate_inp_shexp.type, 0, 0,
                      state.d_x_normed, state.d_shexp_dot, 1, H, B);
       } else {
-        (void)hipMemsetAsync(state.d_shexp_dot, 0, B * sizeof(float), main);
+        GUFO_QWEN35_HIP(hipMemsetAsync(state.d_shexp_dot, 0, B * sizeof(float), main));
       }
     }
 
@@ -685,7 +694,7 @@ void ForwardModelGpuChunk(
     const uint64_t expert_stride_down = layer.ffn_down_exps.RowBytes() * H;
 
     if (B > 1) {
-      (void)hipMemsetAsync(state.d_routed_accum, 0, static_cast<size_t>(B) * H * sizeof(float), main);
+      GUFO_QWEN35_HIP(hipMemsetAsync(state.d_routed_accum, 0, static_cast<size_t>(B) * H * sizeof(float), main));
       DispatchSortMoESlots(
           main, state.d_expert_ids, B * cfg.num_experts_used, cfg.num_experts,
           state.d_expert_counts, state.d_expert_offsets, state.d_expert_cursors, state.d_sorted_slots,
@@ -717,7 +726,7 @@ void ForwardModelGpuChunk(
     }
 
     if (has_side) {
-      (void)hipStreamWaitEvent(main, state.side_done, 0);
+      GUFO_QWEN35_HIP(hipStreamWaitEvent(main, state.side_done, 0));
     }
 
     // Combine routed + shared expert (directly on device, zero CPU sync!)
@@ -725,6 +734,9 @@ void ForwardModelGpuChunk(
 
     // Residual add: d_hidden += d_moe_out
     DispatchResidualAdd(main, state.d_moe_out, B * H, state.d_hidden);
+    if (HipErrorPending()) {
+      break;
+    }
   }
 
   // Final Output Norm & LM Head (for the last token of chunk, if requested)
@@ -736,16 +748,21 @@ void ForwardModelGpuChunk(
     DispatchGemv(main, weights.output.data, weights.output.type, 0, 0,
                  state.d_x_normed, state.d_logits, cfg.vocab_size, H);
 
-    (void)hipMemcpyDtoHAsync(out_logits.data(), state.d_logits, cfg.vocab_size * sizeof(float), main);
-    (void)hipStreamSynchronize(main);
+    GUFO_QWEN35_HIP(hipMemcpyDtoHAsync(out_logits.data(), state.d_logits, cfg.vocab_size * sizeof(float), main));
+    GUFO_QWEN35_HIP(hipStreamSynchronize(main));
   } else {
-    (void)hipStreamSynchronize(main);
+    GUFO_QWEN35_HIP(hipStreamSynchronize(main));
   }
 
   auto t_chunk_end = std::chrono::high_resolution_clock::now();
   double ms = std::chrono::duration<double, std::milli>(t_chunk_end - t_chunk_start).count();
-  std::fprintf(stderr, "[ForwardModelGpuChunk] B=%u pos0=%u: %.2f ms (%.1f tok/s)\n", B, pos0, ms, (B * 1000.0) / ms);
+  if (HipErrorPending()) {
+    std::fprintf(stderr, "[ForwardModelGpuChunk] B=%u pos0=%u FAILED: GPU error pending\n", B, pos0);
+  } else {
+    std::fprintf(stderr, "[ForwardModelGpuChunk] B=%u pos0=%u: %.2f ms (%.1f tok/s)\n", B, pos0, ms, (B * 1000.0) / ms);
+  }
   std::fflush(stderr);
+
 }
 
 }  // namespace gufo::models::qwen35_moe::hip
