@@ -1,253 +1,249 @@
-# Gufo: The ***Open Source*** Strix Halo AI engine 
+# Gufork: The Open Source Strix Halo AI Engine (Fork of Gufo)
 
 <p align="center">
-  <img src="assets/gufo-logo.jpg" alt="Gufo logo" width="180">
+  <img src="assets/gufo-logo.jpg" alt="Gufork logo" width="180">
 </p>
 
-Gufo is a vertical local inference engine for Linux and Windows, specifically built and optimized for AMD Strix Halo hardware:
-Ryzen AI MAX+ 395 systems with Radeon 8060S (`gfx1151`), up to 128 GiB of unified memory.
+> [!NOTE]
+> **Fork Notice & Upstream Credits**: Gufork is a specialized community fork of **[Gufo](https://github.com/gufo-org/gufo)** (`https://github.com/gufo-org/gufo`).
+> Full credit for the core engine architecture, memory management, server pipeline, and baseline Strix Halo (`gfx1151`) optimizations belongs to the [upstream Gufo project and its contributors](https://github.com/gufo-org/gufo). Gufork extends upstream Gufo with native support for ROCmFPX / ROCmFP4 quantization formats and Ornith-1.5-122B hybrid MoE model execution.
 
-**Contributions are welcome!**
+**Gufork** is a high-performance local inference engine for Linux and Windows, specifically engineered and optimized for AMD Strix Halo hardware: **Ryzen AI MAX+ 395** systems with Radeon 8060S (`gfx1151`) and up to 128 GiB of unified memory.
 
-See the [changelog](CHANGELOG.md) and [GitHub Releases](https://github.com/gufo-org/gufo/releases)
-for user-facing changes and release history.
+Binaries are built as **`gufork.exe`** (with convenience aliases **`gurfork.exe`** and **`gufo.exe`**) and **`gufork-server.exe`** (alias **`gufo-server.exe`**).
+---
 
-> [!TIP]
-> Check out **[Gufo RDMA for Dual Strix Halo](https://github.com/neuhaus/gufo)**, a Gufo variant that has not been merged yet!
+## Key Features
 
-## Models and benchmarks
+- **Native ROCmFPX & ROCmFP4 Quantization Support**: Full dequantizer and HIP kernel pipeline for AMD-optimized low-bit formats (`Q4_0_ROCMFP4`, `Q4_0_ROCMFP4_FAST` / `STRIX`, `Q2_0_ROCMFPX`, `Q3_0_ROCMFPX`, `Q6_0_ROCMFPX`, `Q8_0_ROCMFPX`, and `Q4_0_ROCMI4`).
+- **Ornith-1.5-122B-ROCmFP4-Strix Support**: Native execution of [Harsha001/Ornith-1.5-122B-ROCmFPX](https://huggingface.co/Harsha001/Ornith-1.5-122B-ROCmFPX) (122B total parameters, 10B active parameters - 122B-A10B) on AMD Strix Halo:
+  - **65 GB Strix Recipe (`Q4_0_ROCMFP4_STRIX`)** and **80 GB Balanced Recipe (`Q4_0_ROCMFP4_BALANCED`)** with auto-loading multi-part GGUFs.
+  - **F16 Vision Projector Sidecar (`mmproj`)**: Multimodal image understanding supported out of the box.
+  - **Hybrid Architecture**: 48 layers combining 12 Gated GQA Full Attention layers and 36 Gated DeltaNet SSM Linear Recurrence layers.
+  - **Grouped MoE**: 256 routing experts (8 active per token) plus shared expert, accelerated with contiguous coalesced kernels.
+  - **Dual-Stream Execution**: Concurrent Compute 0 + 3D memory overlap for shared expert and SSM computation.
+  - **Tensor-Core WMMA**: Accelerated prefill GEMMs and tiled attention routines.
+- **Batteries-Included Modalities**: Text LLMs, text-to-image (Qwen-Image-2.1), text-to-video (MiniMax H3), speech synthesis (Qwen3-TTS 1.7B), and speech recognition (Qwen3-ASR 1.7B).
+- **OpenAI & Anthropic Compatible Server**: Full streaming, function calling, tool use, structured output, and vision inputs.
+
+---
+
+## Supported Models
 
 All model documentation lives under [docs/models](docs/models/README.md):
 
-| Model | Inference modes | Hugging Face weights | Benchmarks | Quality |
-| --- | --- | --- | --- | --- |
-| [Qwen3.8 27B](docs/models/qwen3.8-27b/README.md) | Q4/Q8, images, AR, DFlash2 | Unsloth [Q4_K_XL](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/blob/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q4_K_XL.gguf) / [Q8_K_XL](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/blob/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q8_K_XL.gguf) · [DFlash2 Q4_K_M](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2-GGUF/blob/2d9571f8ce46e151f61c6499c99dee6079e1d610/Qwen3.8-27B-DFlash2-Q4_K_M.gguf) | Q4: **648.89 tok/s pp**; up to **71.55 tok/s tg** single user and **128.42 aggregated tok/s** on 8 concurrent requests with DFlash2 · [Benchmarks](docs/models/qwen3.8-27b/BENCHMARKS.md) | [Quality](docs/models/qwen3.8-27b/QUALITY.md) |
-| [Qwen3.8 Flash-Next](docs/models/qwen3.8-flash-next/README.md) | Q4, images, AR, MTP | Unsloth [Q4_K_XL](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/tree/38bb39ee97821de2c9009abb7e93950eec396e66/UD-Q4_K_XL) · [MTP Q8_0](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/blob/38bb39ee97821de2c9009abb7e93950eec396e66/MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf) | **1,801.01 tok/s pp** (AR); up to **116.93 tok/s tg** single user and **245.81 aggregated tok/s** on 8 concurrent requests with MTP · [Benchmarks](docs/models/qwen3.8-flash-next/BENCHMARKS.md) | [Quality](docs/models/qwen3.8-flash-next/QUALITY.md) |
-| [DeepSeek V4 Flash](docs/models/deepseek-v4-flash/README.md) | AR, DSpark | [antirez Flash 0731 IQ2XXS](https://huggingface.co/antirez/deepseek-v4-gguf/blob/1cd7b564460821938add0475a60b942c409295e0/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf) · [DSpark](https://huggingface.co/antirez/deepseek-v4-gguf/blob/e7f04037032990db0346398d249baf9fb9df1ccc/DeepSeek-V4-Flash-DSpark-support-0731.gguf) | **484.62 tok/s pp**; up to **26.62 tok/s tg** single user and **54.74 aggregated tok/s** on 8 concurrent requests with DSpark · [Benchmarks](docs/models/deepseek-v4-flash/BENCHMARKS.md) | [Quality](docs/models/deepseek-v4-flash/QUALITY.md) |
-| [Qwen3-ASR 1.7B](docs/models/qwen3-asr/README.md) | Speech recognition | [BF16](https://huggingface.co/Qwen/Qwen3-ASR-1.7B/tree/7278e1e70fe206f11671096ffdd38061171dd6e5) | **15.27× realtime** · [Benchmarks](docs/models/qwen3-asr/BENCHMARKS.md) | [Quality](docs/models/qwen3-asr/QUALITY.md) |
-| [EmbeddingGemma 2](docs/models/embeddinggemma-2/README.md) | Text and image embeddings | [BF16](https://huggingface.co/google/embeddinggemma-2/tree/914f7f89142e33e77833254d9c9b90c3cef7303b) | Up to **41.5k tokens/s** over HTTP; **13.0 ms** for a 404-token request · [Benchmarks](docs/models/embeddinggemma-2/BENCHMARKS.md) | [Quality](docs/models/embeddinggemma-2/QUALITY.md) |
-| [Qwen3-TTS 1.7B](docs/models/qwen3-tts/README.md) | Speech synthesis and voice cloning | BF16 [CustomVoice](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) / [VoiceDesign](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign) / [Base](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base) | Up to **2.54× realtime**; **201 ms** to first audio (CustomVoice) · [Benchmarks](docs/models/qwen3-tts/BENCHMARKS.md) | [Quality](docs/models/qwen3-tts/QUALITY.md) |
-| [Qwen-Image-2.1](docs/models/qwen-image-2.1/README.md) | BF16 image generation and editing | [Complete pipeline](https://huggingface.co/Qwen/Qwen-Image-2.1/tree/b3179ad355be050328e483a9dfdd9e60cd62adfa) | In progress · [Benchmarks](docs/models/qwen-image-2.1/BENCHMARKS.md) | [Quality](docs/models/qwen-image-2.1/QUALITY.md) |
-| [MiniMax H3](docs/models/minimax-h3/README.md) | BF16 text to video/audio | [FL2VA pipeline](https://huggingface.co/MiniMaxAI/MiniMax-H3/tree/42ed227ee7df40d41602854ae760620d6eb651fe/FL2VA) | In progress · [Benchmarks](docs/models/minimax-h3/BENCHMARKS.md) | [Quality](docs/models/minimax-h3/QUALITY.md) |
+| Model | Architecture / Mode | Quantization / Weights | Hardware & Performance Highlights |
+|---|---|---|---|
+| **[Ornith-1.5-122B](https://huggingface.co/Harsha001/Ornith-1.5-122B-ROCmFPX)** | Hybrid Gated GQA + DeltaNet SSM + 256-Expert MoE (122B-A10B, 48 layers) | [Harsha001/Ornith-1.5-122B-ROCmFPX](https://huggingface.co/Harsha001/Ornith-1.5-122B-ROCmFPX): `Q4_0_ROCMFP4_STRIX` (65 GB), `Q4_0_ROCMFP4_BALANCED` (80 GB), `mmproj-f16` (0.9 GB) | **Fits on 96 GB Strix Halo VRAM**; dual-stream shared expert + SSM overlap; contiguous grouped MoE kernels; WMMA tensor-core prefill GEMMs; 4K chunked prefill; up to 256K context. |
+| [Qwen3.8 27B](docs/models/qwen3.8-27b/README.md) | Q4/Q8, images, AR, DFlash2 | Unsloth [Q4_K_XL](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) / [Q8_K_XL](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) · [DFlash2 Q4_K_M](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2-GGUF) | Q4: **648.89 tok/s pp**; up to **71.55 tok/s tg** single user and **128.42 aggregated tok/s** on 8 concurrent requests with DFlash2. |
+| [Qwen3.8 Flash-Next](docs/models/qwen3.8-flash-next/README.md) | Q4, images, AR, MTP | Unsloth [Q4_K_XL](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) · [MTP Q8_0](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) | **1,801.01 tok/s pp** (AR); up to **116.93 tok/s tg** single user and **245.81 aggregated tok/s** on 8 concurrent requests with MTP. |
+| [DeepSeek V4 Flash](docs/models/deepseek-v4-flash/README.md) | AR, DSpark | [antirez Flash 0731 IQ2XXS](https://huggingface.co/antirez/deepseek-v4-gguf) · [DSpark](https://huggingface.co/antirez/deepseek-v4-gguf) | **484.62 tok/s pp**; up to **26.62 tok/s tg** single user and **54.74 aggregated tok/s** on 8 concurrent requests with DSpark. |
+| [Qwen3-ASR 1.7B](docs/models/qwen3-asr/README.md) | Speech recognition | [BF16](https://huggingface.co/Qwen/Qwen3-ASR-1.7B) | **15.27× realtime** audio transcription. |
+| [EmbeddingGemma 2](docs/models/embeddinggemma-2/README.md) | Text and image embeddings | [BF16](https://huggingface.co/google/embeddinggemma-2) | Up to **41.5k tokens/s** over HTTP; **13.0 ms** for a 404-token request. |
+| [Qwen3-TTS 1.7B](docs/models/qwen3-tts/README.md) | Speech synthesis & voice cloning | BF16 [CustomVoice / VoiceDesign / Base](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) | Up to **2.54× realtime**; **201 ms** to first audio. |
+| [Qwen-Image-2.1](docs/models/qwen-image-2.1/README.md) | BF16 image generation & editing | [Complete pipeline](https://huggingface.co/Qwen/Qwen-Image-2.1) | Native DiT image generation on gfx1151. |
+| [MiniMax H3](docs/models/minimax-h3/README.md) | BF16 text to video/audio | [FL2VA pipeline](https://huggingface.co/MiniMaxAI/MiniMax-H3) | Native DiT video synthesis on gfx1151. |
 
-Peak measured workloads; text pp is autoregressive (AR), while tg uses the
-named speculative mode. Peaks include repetitive output; aggregate tg sums
-individual request decode rates. Qwen27B's single-user peak uses the short-prompt
-C1 workload. Audio excludes loading.
-Each model guide lists the required files and complete benchmark settings.
+---
 
-## Philosophy
+## ROCmFPX & ROCmFP4 Quantization Architecture
 
-- Contributions are welcome! We need the help of Strix Halo community to keep improving gufo!
-- We would like this to be the one-stop shop for Strix Halo Local AI enthusiasts: batteries included for text, audio, image, and video models.
-- Build and optimize specifically for the Strix Halo 128 GiB hardware. Smaller memory configurations should still work and preserve the speed benefits for models that can fit on memory.
-- Support only the best available models for their size that can run on this hardware: less code to maintain, more focused optimization and testing work.
-- Preserve quality when optimizing. Each model's quality report records independent numerical checks, execution consistency and unresolved gaps. Don't reuse kernels across different models to limit blast radius of a code change.
-- Treat concurrent requests, cancellation and conversation caching as first-class workloads.
-- Keep production dependencies small and development tools separate.
+ROCmFPX is an AMD-focused low-bit quantization family tailored to maximize bandwidth and compute utilization on AMD RDNA 3.5 (`gfx1151`) architectures.
 
-## Quickstart
+### Block Formats & Memory Layouts
 
-```sh
-hf download unsloth/Qwen3.8-27B-GGUF \
-  Qwen3.8-27B-UD-Q8_K_XL.gguf \
-  --revision 4ca720788d1e01f1bff70c033e0d0028fd02e502 \
-  --repo-type model \
-  --local-dir models/Qwen3.8-27B-GGUF
-hf download z-lab/Qwen3.8-27B-DFlash2-GGUF \
-  Qwen3.8-27B-DFlash2-Q4_K_M.gguf \
-  --revision 2d9571f8ce46e151f61c6499c99dee6079e1d610 \
-  --repo-type model \
-  --local-dir models/Qwen3.8-27B-DFlash2-GGUF
-podman pull ghcr.io/gufo-org/toolboxes/gufo-runtime:latest
-podman run --rm \
-  --userns=keep-id:uid=1000,gid=1000 \
-  --device /dev/kfd \
-  --device /dev/dri \
-  --group-add keep-groups \
-  --ulimit memlock=-1 \
-  -p 8080:8080 \
-  -v ./models:/models:ro \
-  ghcr.io/gufo-org/toolboxes/gufo-runtime:latest \
-  gufo serve --host 0.0.0.0 --port 8080 llm \
-  --model /models/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q8_K_XL.gguf \
-  --speculative dflash2 \
-  --dflash-model /models/Qwen3.8-27B-DFlash2-GGUF/Qwen3.8-27B-DFlash2-Q4_K_M.gguf
+| GGML Type ID | Format Name | Quant Block Size ($QK$) | Encoded Block Size | Description & Scaling |
+|---|---|---|---|---|
+| **100** | `Q4_0_ROCMFP4` | 32 elements | 18 bytes | Dual-scale layout: 16 bytes packed 4-bit Codebook10 codes + two UE4M3 scale bytes. |
+| **101** | `Q4_0_ROCMFP4_FAST` (`_STRIX`) | 32 elements | 17 bytes | Fast single-scale layout: 16 bytes packed 4-bit Codebook10 codes + one UE4M3 scale byte. |
+| **102** | `Q6_0_ROCMFPX` | 32 elements | 26 bytes | 24 bytes packed 6-bit codes + two UE4M3 scale bytes. |
+| **103** | `Q8_0_ROCMFPX` | 32 elements | 33 bytes | 32 int8 codes + one UE4M3 scale byte. |
+| **104** | `Q3_0_ROCMFPX` | 32 elements | 14 bytes | 12 bytes packed 3-bit codes + two UE4M3 scale bytes. |
+| **107** | `Q2_0_ROCMFPX` | 32 elements | 10 bytes | 8 bytes packed 2-bit codes + two UE4M3 scale bytes. |
+| **108** | `Q4_0_ROCMI4` | 32 elements | 17 bytes | 16 bytes packed two's-complement signed nibbles + one UE4M3 scale byte. |
+
+### Hardware-Accelerated Expansion
+
+Gufork executes ROCmFP4 unpack and dot-product kernels directly on `gfx1151` vector units using the AMD GCN byte-permute intrinsic:
+```cpp
+__builtin_amdgcn_perm(v_high, v_low, mask)
+```
+This expands packed nibbles into int32 operands at line-rate without table lookups, eliminating memory stalls in the GEMV/MMVQ and WMMA paths.
+
+---
+
+## Ornith-1.5-122B on Strix Halo
+
+Ornith-1.5-122B is a 122-billion parameter model (10B active parameters per token) utilizing a cutting-edge hybrid architecture:
+- **48 Total Layers**: 12 Full Attention layers (every 4th layer, using Gated Grouped Query Attention) and 36 Linear Attention layers (using Gated DeltaNet State Space Model recurrence).
+- **256 Routing Experts + 1 Shared Expert**: 8 experts activated per token.
+- **Up to 262,144 Context Length**: Full 256k sequence support with chunked prefill (default chunk size 4096).
+- **Multimodal Support**: High-resolution vision inputs via the paired F16 vision projector (`mmproj`).
+
+### VRAM Configuration for 128 GiB Strix Halo
+
+On a 128 GB unified memory AMD Strix Halo system (such as Ryzen AI MAX+ 395):
+- **Set GPU Memory to 96 GB**:
+  - **Windows**: Select 96 GB dedicated VRAM in your BIOS / UEFI settings.
+  - **Linux**: Configure the GTT/TTM kernel parameters (`amdgpu.gttsize=98304`).
+- **Memory Footprint**:
+  - `Q4_0_ROCMFP4_STRIX`: **65 GB** model weights + ~0.9 GB vision projector. Leaves ~30 GB VRAM for long context windows and concurrent requests.
+  - `Q4_0_ROCMFP4_BALANCED`: **80 GB** model weights + ~0.9 GB vision projector. Leaves ~15 GB VRAM for context.
+
+### Downloading the Weights
+
+Download either the **Strix** or **Balanced** variant from Hugging Face:
+
+```bash
+# Strix-tuned 65 GB variant (Recommended for speed and memory headroom)
+hf download Harsha001/Ornith-1.5-122B-ROCmFPX \
+  --include "*Q4_0_STRIX-*" "mmproj*" \
+  --local-dir models/Ornith-1.5-122B
+
+# Or the Balanced 80 GB variant
+hf download Harsha001/Ornith-1.5-122B-ROCmFPX \
+  --include "*Q4_0_BALANCED-*" "mmproj*" \
+  --local-dir models/Ornith-1.5-122B
 ```
 
-Rootless Podman needs `crun` for `--group-add keep-groups`. Your host user must
-have read/write access to `/dev/kfd` and `/dev/dri/renderD*`, usually through the
-`render` and `video` groups; log out and back in after changing membership.
-Container groups named `video`/`render` do not preserve host supplementary
-groups. Check `id`, `ls -l /dev/kfd /dev/dri/renderD*`, and
-`podman info --format '{{.Host.OCIRuntime.Name}}'` if ROCm reports no device.
-See [Podman's rootless group-access guidance](https://github.com/containers/podman/blob/main/troubleshooting.md#20-passed-in-devices-or-files-cant-be-accessed-in-rootless-container).
+---
 
-On Fedora or another SELinux-enforcing host, GPU enumeration can succeed while
-SELinux blocks mapping `/dev/kfd`, causing ROCr to report a misleading
-“Memory critical” error. Check the **host** audit log:
+## Quickstart & Running Gufork
 
-```sh
-sudo ausearch -m avc -ts recent | grep -E '/dev/kfd|hsa_device_t'
+### 1. Execute One-Off Prompts (`gufork prompt` / `gurfork.exe`)
+
+Point Gufork to the first shard; it automatically discovers and streams all remaining shards:
+
+```bash
+# Windows
+gufork.exe prompt -m models/Ornith-1.5-122B/Ornith-1.5-122B-ROCmFP4-Q4_0_STRIX-00001-of-00002.gguf \
+  -p "Explain the difference between Full Attention and DeltaNet SSM in detail." \
+  --think on -v
+
+# Linux
+./gufork prompt -m models/Ornith-1.5-122B/Ornith-1.5-122B-ROCmFP4-Q4_0_STRIX-00001-of-00002.gguf \
+  -p "Hello Ornith! What is your architecture?"
 ```
 
-If it shows a denied `map` for the container, Podman documents this fix:
+### 2. Interactive Terminal Conversation (`gufork chat`)
 
-```sh
-sudo setsebool -P container_use_devices true
+```bash
+gufork.exe chat -m models/Ornith-1.5-122B/Ornith-1.5-122B-ROCmFP4-Q4_0_STRIX-00001-of-00002.gguf
 ```
 
-This persistently allows containers to access device labels for devices passed
-into them; it affects all containers on that host. Review that policy scope
-before enabling it. See [Podman's device documentation](https://docs.podman.io/en/latest/markdown/podman-run.1.html#device-host-device-container-device-permissions)
-and the [SELinux container policy](https://github.com/containers/container-selinux/blob/main/container.te).
+### 3. Start the OpenAI-Compatible API Server (`gufork serve llm` / `gufork-server`)
 
-Then, from another terminal, ask it something through the OpenAI-compatible API:
+You can launch the server either via subcommand or via the dedicated server executable:
 
-```sh
+```bash
+# Using gufork serve
+gufork.exe serve llm \
+  --model models/Ornith-1.5-122B/Ornith-1.5-122B-ROCmFP4-Q4_0_STRIX-00001-of-00002.gguf \
+  --vision-model models/Ornith-1.5-122B/mmproj-Ornith-1.5-122B-f16.gguf \
+  --host 0.0.0.0 \
+  --port 8080 \
+  --context 32768
+
+# Or directly using gufork-server:
+gufork-server.exe llm \
+  --model models/Ornith-1.5-122B/Ornith-1.5-122B-ROCmFP4-Q4_0_STRIX-00001-of-00002.gguf \
+  --host 0.0.0.0 \
+  --port 8080
+```
+
+### 4. Query the API
+
+Send OpenAI-compatible chat requests:
+
+```bash
 curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen3.8-27B-UD-Q8_K_XL",
-    "messages": [{"role": "user", "content": "Say something"}]
+    "model": "Ornith-1.5-122B-ROCmFP4-Q4_0_STRIX",
+    "messages": [
+      {"role": "system", "content": "You are a helpful coding assistant."},
+      {"role": "user", "content": "Write a fast HIP kernel for vector addition."}
+    ],
+    "temperature": 0.7,
+    "max_tokens": 1024
   }'
 ```
 
-For Open WebUI, VS Code, OpenAI SDK and Responses-API clients (for example
-Codex), set the API base URL to `http://localhost:8080/v1`. Chat Completions and
-Responses support text, images, function tools, structured output and streaming.
-See the [API contract](docs/SERVER.md).
+---
 
-The text server uses the model's native context by default and generates until
-EOS or the context is full. `--context N` sets context capacity per session;
-`--max-tokens N` sets a default response limit that clients can override.
-Reasoning tokens count toward that response limit.
+## Prefill & Kernel Verification Harness
 
-## Harness notes
+Gufork includes a specialized verification harness for Ornith-1.5-122B prefill timings, memory checks, and parity:
 
-- **Qwen with Codex:** Codex sends developer messages mid-conversation, after
-  compaction or a settings change. Qwen's template accepts only one leading
-  system turn, so Gufo moves them there. The request that introduces one is
-  prefilled again; later requests reuse the cache. See the
-  [API contract](docs/SERVER.md).
-- **Qwen with Claude Code:** not supported. Claude Code adds a system message
-  to `messages` on every turn, so Gufo moves a new one to the leading system
-  turn each time and every request prefills the whole history again (#522).
+```powershell
+# Run the prefill verification suite
+powershell -ExecutionPolicy Bypass -File tools\verify\ornith_prefill_verify.ps1
+```
 
-## Build from source
+This verifies:
+1. GPU hardware diagnosis and unified VRAM allocation.
+2. Prefill token rates across 512, 2658, and 3800 context sizes.
+3. Prompt parity across English and multilingual prompts.
+4. Output logs saved to `build/verify_logs/<timestamp>/summary.txt`.
 
-Production packages target Linux x86-64 on AMD Strix Halo (`gfx1151`).
-Windows x86-64 is a supported native build target for development; see
-[BUILD-WINDOWS.md](BUILD-WINDOWS.md). CMake owns
-one production configuration for both Nix and ordinary Linux builds. Tests,
-profilers, tuning executables and Python reference runners are not installed
-with the production package. No `build.sh` wrapper is needed.
+---
 
-### With Nix
+## Building from Source
 
-```sh
+### Windows (MSVC + AMD TheRock HIP SDK)
+
+Prerequisites:
+- Visual Studio 2022 (with C++ Desktop workload and CMake tools).
+- AMD TheRock HIP SDK for Windows (`gfx1151`).
+- Ninja build system.
+
+Build with CMake presets:
+
+```powershell
+cmake --preset windows-release
+cmake --build --preset windows-release --parallel 8
+```
+
+The build produces:
+- `build/windows-release/gufork.exe` (Primary CLI binary)
+- `build/windows-release/gurfork.exe` (Convenience alias)
+- `build/windows-release/gufork-server.exe` (Dedicated server binary)
+- `build/windows-release/gufo.exe` and `gufo-server.exe` (Backwards-compatible symlinks/copies)
+
+### Linux (Nix)
+
+```bash
 nix build
-./result/bin/gufo diagnose
-./result/bin/gufo serve llm --model /path/to/model.gguf
+./result/bin/gufork diagnose
+./result/bin/gufork serve llm --model /path/to/Ornith-1.5-122B-ROCmFP4-Q4_0_STRIX-00001-of-00002.gguf
 ```
 
-[flake.lock](flake.lock) pins the dependencies. `nix develop` adds profiling,
-model-download and independent evaluation tools; these are not runtime
-requirements. Optional benchmark baselines are selected separately with
-`nix shell .#ds4-reference`, `.#llama-cpp-reference` or
-`.#llama-cpp-mtp-reference`; see [benchmarking](docs/BENCHMARKS.md).
-See [testing](docs/TESTING.md) for the small hosted CI suite and
-explicit local quality checks.
+### Linux (Without Nix)
 
-Prebuilt store paths are published to the `gufo` Cachix cache. The flake
-declares it in `nixConfig`: users listed in `trusted-users` are asked to accept
-it, or pass `--accept-flake-config`. Nix ignores it for other users; add it
-system-wide with `cachix use gufo` or in `/etc/nix/nix.conf`:
+Install GCC 14+, CMake 3.21+, Ninja, ROCm 10.1+ (HIP Clang, hipBLAS, hipBLASLt, rocWMMA):
 
-```
-extra-substituters = https://gufo.cachix.org
-extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=
-```
-
-The Nix package and development shell use ROCm 10.1.0 (HIP Clang 24)
-from the pinned [nixpkgs ROCm 10.1 update](https://github.com/NixOS/nixpkgs/pull/573885).
-Python, Python packages and general build dependencies come from the pinned
-`nixos-unstable` input. The ROCm package set comes from the separate fork,
-retaining its compiler/runtime dependencies to reuse the gfx1151 binaries on
-`gufo.cachix.org`. All Nix workflows configure this cache explicitly.
-Both include a [queue-memory patch](.devops/nix/patches/rocr-fixed-cwsr-rocm10.patch)
-for Strix Halo. It keeps queue save/restore buffers, launch/copy arenas and
-code-loading staging resident during host memory compaction, while retaining
-managed-memory support and the ordinary fine-grained host-allocation policy.
-
-### Without Nix
-
-Install a C++20 compiler, CMake 3.21+, Ninja, pkg-config and the
-following development libraries. The pinned Nix toolchain uses GCC
-16.2 and ROCm 10.1.0 (HIP Clang 24). Attention and audio convolution kernels are compiled
-directly from HIP. Python, Triton/AOTriton, Composable Kernel and MIOpen are
-not production build or runtime requirements.
-For the same protection against queue evictions as the Nix build, apply the
-ROCr patch above when building your runtime. Flash-Next's host buffers also use
-Linux long-term pins, with ordinary HIP registration retained when system
-limits disallow those pins. Gufo leaves `HSA_USERPTR_FOR_PAGED_MEM` unchanged.
-
-| Dependency | Used for |
-| --- | --- |
-| ROCm HIP compiler/runtime, hipBLAS, hipBLASLt, rocBLAS | GPU execution and matrix multiplication |
-| hipCUB, rocPRIM, rocWMMA headers | Compiled GPU kernels |
-| ICU, libcurl, OpenSSL, libpng, libjpeg, libwebp | Tokenization, HTTPS, hashing and images |
-| libsndfile, libsoxr | Audio decoding and reference-compatible resampling |
-| FFmpeg and ffprobe | Video/audio output; invoked as separate executables |
-
-Install ROCm using [AMD's Linux instructions](https://rocm.docs.amd.com/projects/install-on-linux/en/latest/).
-Use the development packages for the libraries above. ROCm normally installs
-under `/opt/rocm`.
-
-For example, on Debian/Ubuntu the ordinary system libraries are:
-
-```sh
-sudo apt install build-essential cmake ninja-build pkg-config \
-  libicu-dev libcurl4-openssl-dev libssl-dev libpng-dev libjpeg-dev libwebp-dev libsndfile1-dev libsoxr-dev ffmpeg
-
-# ROCm libraries from the table, named as AMD's repository ships them.
-sudo apt install hipblas-dev hipblaslt-dev rocblas-dev \
-  hipcub-dev rocprim-dev rocwmma-dev
-
+```bash
 cmake --preset release -DCMAKE_INSTALL_PREFIX="$HOME/.local"
-cmake --build --preset release --parallel 4
-./build/release/gufo diagnose
-./build/release/gufo serve llm --model /path/to/model.gguf
+cmake --build --preset release --parallel 8
+./build/release/gufork diagnose
 ```
 
-Configuring fails at `find_package(hipblas)` when those ROCm packages are
-missing. Other distributions name them `-devel` instead of `-dev`.
-For nonstandard installations, pass ordinary CMake paths, for example
-`cmake --preset release -DCMAKE_PREFIX_PATH="/opt/rocm"`.
-If compiler discovery picks a system Clang, also pass
-`-DCMAKE_HIP_COMPILER=/opt/rocm/llvm/bin/clang++`.
-Use `cmake --install build/release` to install Gufo,
-its runtime data and license notices. The GPU driver must allow your user to
-access `/dev/kfd` and `/dev/dri`; model weights are acquired separately.
+---
 
-The same source, compiler flags and install rules serve both builds. Nix pins
-the complete toolchain for reproducible comparisons; changing the compiler or
-math libraries requires the affected model's quality checks.
+## Upstream Credits & License
 
-## License
+Gufork is forked from **[Gufo](https://github.com/gufo-org/gufo)** (`https://github.com/gufo-org/gufo`).
 
-Gufo's original code is [MIT licensed](LICENSE). Adapted code and dependencies
-retain their own notices in [NOTICE](NOTICE), [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
-and `licenses/`, installed under `share/licenses/gufo`. Model weights are not
-bundled and retain their publishers' terms.
+Full credit for the groundbreaking zero-overhead vertical inference engine on AMD Strix Halo belongs to the upstream [Gufo project](https://github.com/gufo-org/gufo) and its contributors. Please check out and star upstream:
+- **Upstream Repository**: [https://github.com/gufo-org/gufo](https://github.com/gufo-org/gufo)
+- **Upstream Releases**: [https://github.com/gufo-org/gufo/releases](https://github.com/gufo-org/gufo/releases)
 
-## Reference Projects
+Gufork's original code is licensed under the [MIT License](LICENSE). Adapted code and dependencies retain their own notices in [NOTICE](NOTICE), [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), and `licenses/`.
 
-The initial design is informed by the following open source projects:
-
-- [llama.cpp](https://github.com/ggml-org/llama.cpp) for compact model serving, GGUF, and CPU/GPU correctness paths.
-- [LaurentZuijdwijk/llama.cpp](https://github.com/LaurentZuijdwijk/llama.cpp), [Nathanw1014/strix-halo-llamacpp](https://github.com/Nathanw1014/strix-halo-llamacpp), and [gaetan-puleo/llama-cpp-strix-halo](https://github.com/gaetan-puleo/llama-cpp-strix-halo) for Strix Halo optimization inspiration.
-- [vLLM](https://github.com/vllm-project/vllm) for continuous batching and paged request scheduling.
-- [hipEngine](https://github.com/shisa-ai/hipEngine) for torch-free HIP execution, and native speculative-cycle work.
-- [ds4](https://github.com/antirez/ds4) for DeepSeek V4 Flash, MoE scheduling, and DSpark.
-- [audio.cpp](https://github.com/0xShug0/audio.cpp) for audio models for tts and asr tasks.
+Acknowledgements and references:
+- **[Gufo](https://github.com/gufo-org/gufo)**: Upstream vertical Strix Halo inference engine.
+- **[Harsha001](https://huggingface.co/Harsha001/Ornith-1.5-122B-ROCmFPX)**: ROCmFPX quantization and GGUF conversion for Ornith-1.5-122B.
+- **[ROCmFPX](https://github.com/charlie12345/ROCmFPX)**: AMD low-bit quantization specifications and kernels.
+- **[Ornith AI](https://huggingface.co/ornith-ai/Ornith-1.5-122B)**: Base model architecture and BF16 model weights.
+- **[bartowski](https://huggingface.co/bartowski/Ornith-1.5-122B-GGUF)**: Importance matrix calibration datasets.
+- **[llama.cpp](https://github.com/ggml-org/llama.cpp)**: GGUF specification and quantized representation foundations.

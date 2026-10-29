@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(gufo LANGUAGES C CXX)
+project(gufork LANGUAGES C CXX)
 # Production remains Linux x86-64 on gfx1151; Windows x86-64 is a supported
 # native build target sharing the same source tree.
 if (NOT (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows")
@@ -431,7 +431,7 @@ add_library(gufo_http STATIC
 )
 target_link_libraries(gufo_http PUBLIC gufo_logging gufo_core gufo_qwen3_tts gufo_qwen3_asr gufo_qwen_image_21 gufo_embedding_gemma2)
 
-add_executable(gufo
+add_executable(gufork
   src/cli/main.cpp
   src/cli/banner.cpp
   src/cli/eval/eval.cpp
@@ -446,9 +446,11 @@ add_executable(gufo
   src/cli/serve/inference_backend.cpp
   src/eval/http_client.cpp
 )
-target_link_libraries(gufo PRIVATE gufo_cache gufo_diagnostics gufo_core gufo_llm_cli gufo_http CURL::libcurl)
-gufo_stage_hip_runtime(gufo)
-target_compile_definitions(gufo PRIVATE
+add_executable(gufo ALIAS gufork)
+add_executable(gurfork ALIAS gufork)
+target_link_libraries(gufork PRIVATE gufo_cache gufo_diagnostics gufo_core gufo_llm_cli gufo_http CURL::libcurl)
+gufo_stage_hip_runtime(gufork)
+target_compile_definitions(gufork PRIVATE
   GUFO_RELEASE_VERSION="${GUFO_RELEASE_VERSION}"
   GUFO_REVISION="${GUFO_REVISION}"
   GUFO_EVAL_SOURCE_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/models/deepseek_v4_flash/fixtures/antirez-ds4.json"
@@ -457,21 +459,28 @@ target_compile_definitions(gufo PRIVATE
   GUFO_H3_INSTALLED_SOURCE_MANIFEST="${CMAKE_INSTALL_PREFIX}/share/gufo/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json")
 
 if (ENGINE_ENABLE_HIP)
-  target_link_libraries(gufo PRIVATE gufo_cache_hip gufo_deepseek_v4_flash)
+  target_link_libraries(gufork PRIVATE gufo_cache_hip gufo_deepseek_v4_flash)
 endif()
-target_link_libraries(gufo PRIVATE gufo_qwen3_tts gufo_qwen3_asr gufo_embedding_gemma2 gufo_qwen35_moe)
+target_link_libraries(gufork PRIVATE gufo_qwen3_tts gufo_qwen3_asr gufo_embedding_gemma2 gufo_qwen35_moe)
 
 if (NOT WIN32)
-  add_custom_target(gufo-server ALL
-    COMMAND ${CMAKE_COMMAND} -E create_symlink $<TARGET_FILE_NAME:gufo> ${CMAKE_CURRENT_BINARY_DIR}/gufo-server
-    DEPENDS gufo
+  add_custom_target(gufork-server ALL
+    COMMAND ${CMAKE_COMMAND} -E create_symlink $<TARGET_FILE_NAME:gufork> ${CMAKE_CURRENT_BINARY_DIR}/gufork-server
+    COMMAND ${CMAKE_COMMAND} -E create_symlink $<TARGET_FILE_NAME:gufork> ${CMAKE_CURRENT_BINARY_DIR}/gurfork
+    COMMAND ${CMAKE_COMMAND} -E create_symlink $<TARGET_FILE_NAME:gufork> ${CMAKE_CURRENT_BINARY_DIR}/gufo
+    COMMAND ${CMAKE_COMMAND} -E create_symlink $<TARGET_FILE_NAME:gufork> ${CMAKE_CURRENT_BINARY_DIR}/gufo-server
+    DEPENDS gufork
   )
 else()
-  add_custom_target(gufo-server ALL
-    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:gufo> ${CMAKE_CURRENT_BINARY_DIR}/gufo-server.exe
-    DEPENDS gufo
+  add_custom_target(gufork-server ALL
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:gufork> ${CMAKE_CURRENT_BINARY_DIR}/gurfork.exe
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:gufork> ${CMAKE_CURRENT_BINARY_DIR}/gufork-server.exe
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:gufork> ${CMAKE_CURRENT_BINARY_DIR}/gufo.exe
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:gufork> ${CMAKE_CURRENT_BINARY_DIR}/gufo-server.exe
+    DEPENDS gufork
   )
 endif()
+add_custom_target(gufo-server ALL DEPENDS gufork-server)
 if (BUILD_TESTING OR GUFO_BUILD_TOOLS)
   add_library(gufo_kernel_bench_support STATIC
     src/cli/bench/kernel_bench.cpp)
@@ -501,7 +510,7 @@ if (ENGINE_ENABLE_HIP AND GUFO_BUILD_TOOLS)
   target_link_libraries(wmma_layout_test PRIVATE gufo_core hip::device)
 endif()
 
-install(TARGETS gufo DESTINATION bin)
+install(TARGETS gufork DESTINATION bin)
 install(FILES
   src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json
   DESTINATION share/gufo/models/minimax_h3)
@@ -512,9 +521,15 @@ install(FILES LICENSE NOTICE THIRD_PARTY_NOTICES.md DESTINATION share/licenses/g
 install(DIRECTORY licenses/ DESTINATION share/licenses/gufo/third-party)
 install(FILES src/models/deepseek_v4_flash/LICENSE.ds4 DESTINATION share/licenses/gufo/third-party)
 if (NOT WIN32)
-install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E create_symlink gufo \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufo-server\")")
+  install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E create_symlink gufork \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gurfork\")")
+  install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E create_symlink gufork \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufork-server\")")
+  install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E create_symlink gufork \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufo\")")
+  install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E create_symlink gufork \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufo-server\")")
 else()
-  install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E copy \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufo.exe\" \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufo-server.exe\")")
+  install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E copy \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufork.exe\" \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gurfork.exe\")")
+  install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E copy \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufork.exe\" \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufork-server.exe\")")
+  install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E copy \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufork.exe\" \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufo.exe\")")
+  install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E copy \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufork.exe\" \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufo-server.exe\")")
 endif()
 if (ENGINE_ENABLE_HIP AND GUFO_BUILD_TOOLS)
   install(TARGETS gufo-kernel-bench tune_hipblaslt
@@ -566,11 +581,11 @@ if (BUILD_TESTING)
 
   add_subdirectory(tests/models/embedding_gemma2)
 
-  add_test(NAME gufo_version COMMAND gufo --version)
+  add_test(NAME gufo_version COMMAND gufork --version)
   set_tests_properties(gufo_version PROPERTIES
     LABELS "cpu"
     PASS_REGULAR_EXPRESSION
-      "gufo version ${GUFO_RELEASE_VERSION} \\(${GUFO_REVISION}\\)")
+      "(gufo|gufork) version ${GUFO_RELEASE_VERSION} \\(${GUFO_REVISION}\\)")
 
   add_test(NAME gufo_help COMMAND gufo --help)
   set_tests_properties(gufo_help PROPERTIES LABELS "cpu")

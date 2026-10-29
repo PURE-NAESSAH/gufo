@@ -57,10 +57,10 @@ void PrintStartupBanner(std::string_view version,
   const char* bold = color ? "\033[1m" : "";
   const char* reset = color ? "\033[0m" : "";
 
-  std::clog << "  " << tint << ",___," << reset << "   " << bold << "gufo"
+  std::clog << "  " << tint << ",___," << reset << "   " << bold << "gufork"
             << reset << ' ' << version << '\n'
             << "  " << tint << eyes << reset << "   Fast LLM & DiT inference"
-            << separator << "gfx1151\n"
+            << separator << "gfx1151" << separator << "Fork of gufo-org/gufo\n"
             << std::flush;
 }
 
