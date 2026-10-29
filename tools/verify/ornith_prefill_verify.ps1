@@ -20,15 +20,15 @@ function Vram-Snapshot {
 }
 
 function Step {
-  param([string]$Name, [string]$Exe, [string[]]$Args)
+  param([string]$Name, [string]$Exe, [string[]]$CmdArgs)
   Add-Content $sum ''
   Add-Content $sum ("=== [{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $Name)
   if (-not (Test-Path $Exe)) { Add-Content $sum "  SKIPPED: exe missing ($Exe)"; return }
   $out = Join-Path $log "$Name.txt"
-  "CMD: $Exe $($Args -join ' ')" | Out-File -Encoding utf8 $out
+  "CMD: $Exe $($CmdArgs -join ' ')" | Out-File -Encoding utf8 $out
   Vram-Snapshot
   $sw = [Diagnostics.Stopwatch]::StartNew()
-  & $Exe @Args *>&1 | Out-File -Encoding utf8 -Append $out
+  & $Exe @CmdArgs *>&1 | Out-File -Encoding utf8 -Append $out
   $code = $LASTEXITCODE
   $sw.Stop()
   Add-Content $sum ("  exit={0} wall={1}s out={2}" -f $code, [math]::Round($sw.Elapsed.TotalSeconds,1), $out)
