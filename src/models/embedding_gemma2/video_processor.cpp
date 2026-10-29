@@ -1,11 +1,13 @@
 #include "src/models/embedding_gemma2/video_processor.hpp"
 
+#if defined(GUFO_ENABLE_AV)
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/imgutils.h>
 #include <libswscale/swscale.h>
 }
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -24,6 +26,7 @@ extern "C" {
 
 namespace gufo::models::embedding_gemma2 {
 namespace {
+#if defined(GUFO_ENABLE_AV)
 // Thread-safe first-use loading preserves text/image/audio startup latency.
 // Hold handles before the typed symbols so every function pointer stays valid.
 struct FFmpegApi {
@@ -309,6 +312,7 @@ struct Decoder {
     return count;
   }
 };
+#endif
 }  // namespace
 
 std::vector<std::size_t> SampleVideoFrames(std::size_t frames, double fps,
@@ -340,6 +344,7 @@ std::vector<std::size_t> SampleVideoFrames(std::size_t frames, double fps,
   return indices;
 }
 
+#if defined(GUFO_ENABLE_AV)
 bool ValidateVideoProcessor(const std::string& model_dir, std::string* error) {
   try {
     std::ifstream file(std::filesystem::path(model_dir) /
@@ -435,6 +440,26 @@ std::vector<VideoFrame> ProcessVideo(std::span<const std::uint8_t> bytes,
     throw std::invalid_argument("embedding video lost selected frames");
   return frames;
 }
+#else
+bool ValidateVideoProcessor(const std::string& /*model_dir*/,
+                            std::string* error) {
+  if (error)
+    *error =
+        "embedding_gemma2: FFmpeg development libraries not installed; video "
+        "inputs unsupported";
+  return false;
+}
+
+std::vector<VideoFrame> ProcessVideo(
+    std::span<const std::uint8_t> /*bytes*/,
+    const VideoOptions& /*options*/,
+    const std::function<bool()>& /*is_cancelled*/,
+    std::size_t /*frame_budget*/) {
+  throw std::invalid_argument(
+      "embedding request video frame budget exhausted: FFmpeg development "
+      "libraries not installed");
+}
+#endif
 
 std::string FrameVideo(const std::vector<VideoFrame>& frames,
                        const VideoOptions& options) {
