@@ -25,15 +25,16 @@ constexpr std::string_view kGufoRevision = GUFO_REVISION;
 namespace {
 
 void print_version() {
-  std::cout << "gufo version " << kGufoReleaseVersion << " (" << kGufoRevision
-            << ")\n";
+  std::cout << "gufork version " << kGufoReleaseVersion << " (" << kGufoRevision
+            << ") [Fork of Gufo: https://github.com/gufo-org/gufo]\n";
 }
 
 void print_help(std::string_view program_name) {
   std::cout
       << "Usage: " << program_name << " <COMMAND> [OPTIONS]\n\n"
-      << "Fast LLM & DiT video inference engine for AMD Strix Halo "
-         "(gfx1151).\n\n"
+      << "Gufork: Fast LLM & DiT video inference engine for AMD Strix Halo "
+         "(gfx1151).\n"
+      << "Fork of Gufo: https://github.com/gufo-org/gufo\n\n"
       << "Commands:\n"
       << "  serve          Start the OpenAI-compatible HTTP server\n"
       << "  prompt         Execute one prompt request and exit\n"
@@ -54,7 +55,7 @@ void print_help(std::string_view program_name) {
 int run(std::span<const char* const> args) {
   if (args.empty()) {
     std::cerr << "Error: missing command or option\n";
-    print_help("gufo");
+    print_help("gufork");
     return 2;
   }
 
@@ -159,9 +160,15 @@ int run(std::span<const char* const> args) {
     return gufo::cli::RunServe(options.subspan(1));
   }
 
-  // If invoked as legacy binary name or flag passed directly, route to serve
-  if (program_name.ends_with("gufo-server") ||
-      program_name.ends_with("/gufo-server")) {
+  // If invoked as server binary name or flag passed directly, route to serve
+  if (program_name.ends_with("gufork-server") ||
+      program_name.ends_with("gufork-server.exe") ||
+      program_name.ends_with("/gufork-server") ||
+      program_name.ends_with("\\gufork-server.exe") ||
+      program_name.ends_with("gufo-server") ||
+      program_name.ends_with("gufo-server.exe") ||
+      program_name.ends_with("/gufo-server") ||
+      program_name.ends_with("\\gufo-server.exe")) {
     return gufo::cli::RunServe(options);
   }
 

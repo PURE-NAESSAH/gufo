@@ -18,6 +18,7 @@
 #include "src/core/gguf_reader.hpp"
 #include "src/core/hip/host_allocations.hpp"
 #include "src/core/hip/managed_alloc.hpp"
+#include "src/core/quant/ggml_dequant.hpp"
 #include "src/models/qwen/hip/ops/gemm.hpp"
 #include "src/models/qwen/vision/encoder.hpp"
 
@@ -389,7 +390,7 @@ struct Encoder::Impl {
     expect("clip.vision.attention.head_count", kHeads);
     expect("clip.vision.spatial_merge_size", 2);
     expect("clip.vision.image_size", 768);
-    if ((width != 5120 && width != 2560) ||
+    if ((width != 5120 && width != 2560 && width != 3072) ||
         reader->GetMetadataString("general.architecture") != "clip" ||
         reader->GetMetadataString("general.type") != "mmproj" ||
         reader->GetMetadataBool("clip.has_vision_encoder") != true ||
@@ -397,7 +398,7 @@ struct Encoder::Impl {
         reader->GetMetadataFloat32(
             "clip.vision.attention.layer_norm_epsilon") != 1e-6F) {
       throw std::invalid_argument(
-          "vision sidecar does not match the Qwen3.8 model");
+          "vision sidecar does not match the Qwen model");
     }
     for (const auto key : {"clip.vision.image_mean", "clip.vision.image_std"}) {
       const auto* value = reader->FindMetadata(key);
@@ -426,13 +427,17 @@ struct Encoder::Impl {
                              std::initializer_list<std::uint64_t> shape,
                              core::GgmlType type) {
       const auto* tensor = reader->FindTensor(name);
+      const bool type_match = (tensor != nullptr) &&
+          (tensor->type == type ||
+           (type == core::GgmlType::kBF16 && tensor->type == core::GgmlType::kF16) ||
+           (type == core::GgmlType::kF32 && tensor->type == core::GgmlType::kF16));
       if (tensor == nullptr ||
           tensor->dimensions != std::vector<std::uint64_t>(shape) ||
-          tensor->type != type) {
-        throw std::invalid_argument("invalid BF16 Qwen vision tensor: " + name);
+          !type_match) {
+        throw std::invalid_argument("invalid Qwen vision tensor: " + name);
       }
       const auto bytes =
-          tensor->ElementCount() * (type == core::GgmlType::kF32 ? 4 : 2);
+          tensor->ElementCount() * (tensor->type == core::GgmlType::kF32 ? 4 : 2);
       const auto address = reinterpret_cast<std::uintptr_t>(tensor->data);
       const bool mapped = std::any_of(
           reader->GetMappedRegions().begin(), reader->GetMappedRegions().end(),
@@ -510,20 +515,33 @@ struct Encoder::Impl {
           tensor.ElementCount() * (tensor.type == core::GgmlType::kF32 ? 4 : 2);
       Allocation buffer = Allocation::Weight(bytes);
       bytes_uploaded += bytes;
-      upload.Copy(buffer.data, tensor.data, bytes);
+      if (tensor.type == core::GgmlType::kF16) {
+        std::vector<std::uint16_t> converted(tensor.ElementCount());
+        const auto* src = static_cast<const std::uint16_t*>(tensor.data);
+        for (std::size_t i = 0; i < tensor.ElementCount(); ++i) {
+          converted[i] = ToBf16(gufo::quant::Fp16ToFloat(src[i]));
+        }
+        upload.Copy(buffer.data, converted.data(), bytes);
+      } else {
+        upload.Copy(buffer.data, tensor.data, bytes);
+      }
       weights.emplace(tensor.name, std::move(buffer));
     }
-    const auto* first = static_cast<const float*>(
-        reader->FindTensor("v.patch_embd.weight")->data);
-    const auto* second = static_cast<const float*>(
-        reader->FindTensor("v.patch_embd.weight.1")->data);
+    const auto* first_tensor = reader->FindTensor("v.patch_embd.weight");
+    const auto* second_tensor = reader->FindTensor("v.patch_embd.weight.1");
+    auto get_patch_val = [](const core::GgufTensorInfo* t, std::size_t idx) -> float {
+      if (t->type == core::GgmlType::kF16) {
+        return gufo::quant::Fp16ToFloat(static_cast<const std::uint16_t*>(t->data)[idx]);
+      }
+      return static_cast<const float*>(t->data)[idx];
+    };
     std::vector<std::uint16_t> patch(kHidden * kPatchDim);
     for (unsigned h = 0; h < kHidden; ++h) {
       for (unsigned c = 0; c < 3; ++c) {
         for (unsigned t = 0; t < 2; ++t) {
           for (unsigned p = 0; p < 256; ++p) {
             patch[h * kPatchDim + (c * 2 + t) * 256 + p] =
-                ToBf16((t == 0 ? first : second)[(h * 3 + c) * 256 + p]);
+                ToBf16(get_patch_val(t == 0 ? first_tensor : second_tensor, (h * 3 + c) * 256 + p));
           }
         }
       }
@@ -567,6 +585,15 @@ std::shared_ptr<Encoder> Encoder::Open(const std::filesystem::path& target,
     const auto path = directory / "mmproj-BF16.gguf";
     if (std::filesystem::is_regular_file(path))
       return std::make_shared<Encoder>(path, width);
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(directory, ec)) {
+      if (entry.is_regular_file()) {
+        const auto filename = entry.path().filename().string();
+        if (filename.rfind("mmproj", 0) == 0 && entry.path().extension() == ".gguf") {
+          return std::make_shared<Encoder>(entry.path(), width);
+        }
+      }
+    }
     directory = directory.parent_path();
   }
   return {};

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(gufo LANGUAGES C CXX)
+project(gufork LANGUAGES C CXX)
 # Production remains Linux x86-64 on gfx1151; Windows x86-64 is a supported
 # native build target sharing the same source tree.
 if (NOT (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows")
@@ -110,6 +110,20 @@ endif()
 
 if (ENGINE_ENABLE_HIP)
   enable_language(HIP)
+  if (WIN32)
+    # CMake does not define MSVC runtime library options for HIP with clang-cl
+    set(CMAKE_HIP_COMPILE_OPTIONS_MSVC_RUNTIME_LIBRARY_MultiThreaded         -MT)
+    set(CMAKE_HIP_COMPILE_OPTIONS_MSVC_RUNTIME_LIBRARY_MultiThreadedDLL      -MD)
+    set(CMAKE_HIP_COMPILE_OPTIONS_MSVC_RUNTIME_LIBRARY_MultiThreadedDebug    -MTd)
+    set(CMAKE_HIP_COMPILE_OPTIONS_MSVC_RUNTIME_LIBRARY_MultiThreadedDebugDLL -MDd)
+    set(CMAKE_HIP_COMPILE_OPTIONS_MSVC_DEBUG_INFORMATION_FORMAT_Embedded        -Z7)
+    set(CMAKE_HIP_COMPILE_OPTIONS_MSVC_DEBUG_INFORMATION_FORMAT_ProgramDatabase -Zi)
+    # CMake's Windows-Clang-HIP.cmake adds -TP (force C++) which breaks HIP kernel compilation on clang-cl.
+    # Replace it with -x hip so clang-cl compiles all HIP targets (including .hip.cpp sources) as HIP.
+    string(REPLACE " -TP" " -x hip" CMAKE_HIP_COMPILE_OBJECT "${CMAKE_HIP_COMPILE_OBJECT}")
+    string(REPLACE "-TP " "-x hip " CMAKE_HIP_COMPILE_OBJECT "${CMAKE_HIP_COMPILE_OBJECT}")
+    string(REPLACE "-TP" "-x hip" CMAKE_HIP_COMPILE_OBJECT "${CMAKE_HIP_COMPILE_OBJECT}")
+  endif()
   # clang-cl compiles HIP like C++ on Windows, so ccache covers it there.
   if (GUFO_CCACHE_CLANG_CL)
     set(CMAKE_HIP_COMPILER_LAUNCHER "${GUFO_CCACHE_PROGRAM}")
@@ -163,6 +177,9 @@ endif()
 
 # Qwen3.8-Flash-Next — model-private CPU reference plus ROCm runtime.
 add_subdirectory(src/models/qwen38_flash_next)
+
+# Qwen3.5-MoE Ornith-1.5-122B - model-private runtime with ROCmFP4 quants.
+add_subdirectory(src/models/qwen35_moe)
 
 # Qwen3-TTS — CPU reference + HIP kernels (CustomVoice 12Hz).
 add_subdirectory(src/models/qwen3_tts)
@@ -377,7 +394,7 @@ endif()
 add_library(gufo_llm_cli STATIC
   src/cli/bench/bench.cpp
   src/cli/prompt/prompt.cpp)
-target_link_libraries(gufo_llm_cli PUBLIC gufo_core gufo_qwen38_flash_next)
+target_link_libraries(gufo_llm_cli PUBLIC gufo_core gufo_qwen38_flash_next gufo_qwen35_moe)
 if(ENGINE_ENABLE_HIP)
   target_link_libraries(gufo_llm_cli PUBLIC gufo_deepseek_v4_flash)
 endif()
@@ -414,7 +431,7 @@ add_library(gufo_http STATIC
 )
 target_link_libraries(gufo_http PUBLIC gufo_logging gufo_core gufo_qwen3_tts gufo_qwen3_asr gufo_qwen_image_21 gufo_embedding_gemma2)
 
-add_executable(gufo
+add_executable(gufork
   src/cli/main.cpp
   src/cli/banner.cpp
   src/cli/eval/eval.cpp
@@ -429,9 +446,11 @@ add_executable(gufo
   src/cli/serve/inference_backend.cpp
   src/eval/http_client.cpp
 )
-target_link_libraries(gufo PRIVATE gufo_cache gufo_diagnostics gufo_core gufo_llm_cli gufo_http CURL::libcurl)
-gufo_stage_hip_runtime(gufo)
-target_compile_definitions(gufo PRIVATE
+add_executable(gufo ALIAS gufork)
+add_executable(gurfork ALIAS gufork)
+target_link_libraries(gufork PRIVATE gufo_cache gufo_diagnostics gufo_core gufo_llm_cli gufo_http CURL::libcurl)
+gufo_stage_hip_runtime(gufork)
+target_compile_definitions(gufork PRIVATE
   GUFO_RELEASE_VERSION="${GUFO_RELEASE_VERSION}"
   GUFO_REVISION="${GUFO_REVISION}"
   GUFO_EVAL_SOURCE_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/models/deepseek_v4_flash/fixtures/antirez-ds4.json"
@@ -440,21 +459,28 @@ target_compile_definitions(gufo PRIVATE
   GUFO_H3_INSTALLED_SOURCE_MANIFEST="${CMAKE_INSTALL_PREFIX}/share/gufo/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json")
 
 if (ENGINE_ENABLE_HIP)
-  target_link_libraries(gufo PRIVATE gufo_cache_hip gufo_deepseek_v4_flash)
+  target_link_libraries(gufork PRIVATE gufo_cache_hip gufo_deepseek_v4_flash)
 endif()
-target_link_libraries(gufo PRIVATE gufo_qwen3_tts gufo_qwen3_asr gufo_embedding_gemma2)
+target_link_libraries(gufork PRIVATE gufo_qwen3_tts gufo_qwen3_asr gufo_embedding_gemma2 gufo_qwen35_moe)
 
 if (NOT WIN32)
-  add_custom_target(gufo-server ALL
-    COMMAND ${CMAKE_COMMAND} -E create_symlink $<TARGET_FILE_NAME:gufo> ${CMAKE_CURRENT_BINARY_DIR}/gufo-server
-    DEPENDS gufo
+  add_custom_target(gufork-server ALL
+    COMMAND ${CMAKE_COMMAND} -E create_symlink $<TARGET_FILE_NAME:gufork> ${CMAKE_CURRENT_BINARY_DIR}/gufork-server
+    COMMAND ${CMAKE_COMMAND} -E create_symlink $<TARGET_FILE_NAME:gufork> ${CMAKE_CURRENT_BINARY_DIR}/gurfork
+    COMMAND ${CMAKE_COMMAND} -E create_symlink $<TARGET_FILE_NAME:gufork> ${CMAKE_CURRENT_BINARY_DIR}/gufo
+    COMMAND ${CMAKE_COMMAND} -E create_symlink $<TARGET_FILE_NAME:gufork> ${CMAKE_CURRENT_BINARY_DIR}/gufo-server
+    DEPENDS gufork
   )
 else()
-  add_custom_target(gufo-server ALL
-    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:gufo> ${CMAKE_CURRENT_BINARY_DIR}/gufo-server.exe
-    DEPENDS gufo
+  add_custom_target(gufork-server ALL
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:gufork> ${CMAKE_CURRENT_BINARY_DIR}/gurfork.exe
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:gufork> ${CMAKE_CURRENT_BINARY_DIR}/gufork-server.exe
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:gufork> ${CMAKE_CURRENT_BINARY_DIR}/gufo.exe
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:gufork> ${CMAKE_CURRENT_BINARY_DIR}/gufo-server.exe
+    DEPENDS gufork
   )
 endif()
+add_custom_target(gufo-server ALL DEPENDS gufork-server)
 if (BUILD_TESTING OR GUFO_BUILD_TOOLS)
   add_library(gufo_kernel_bench_support STATIC
     src/cli/bench/kernel_bench.cpp)
@@ -484,7 +510,7 @@ if (ENGINE_ENABLE_HIP AND GUFO_BUILD_TOOLS)
   target_link_libraries(wmma_layout_test PRIVATE gufo_core hip::device)
 endif()
 
-install(TARGETS gufo DESTINATION bin)
+install(TARGETS gufork DESTINATION bin)
 install(FILES
   src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json
   DESTINATION share/gufo/models/minimax_h3)
@@ -495,9 +521,15 @@ install(FILES LICENSE NOTICE THIRD_PARTY_NOTICES.md DESTINATION share/licenses/g
 install(DIRECTORY licenses/ DESTINATION share/licenses/gufo/third-party)
 install(FILES src/models/deepseek_v4_flash/LICENSE.ds4 DESTINATION share/licenses/gufo/third-party)
 if (NOT WIN32)
-install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E create_symlink gufo \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufo-server\")")
+  install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E create_symlink gufork \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gurfork\")")
+  install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E create_symlink gufork \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufork-server\")")
+  install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E create_symlink gufork \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufo\")")
+  install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E create_symlink gufork \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufo-server\")")
 else()
-  install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E copy \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufo.exe\" \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufo-server.exe\")")
+  install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E copy \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufork.exe\" \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gurfork.exe\")")
+  install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E copy \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufork.exe\" \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufork-server.exe\")")
+  install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E copy \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufork.exe\" \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufo.exe\")")
+  install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E copy \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufork.exe\" \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufo-server.exe\")")
 endif()
 if (ENGINE_ENABLE_HIP AND GUFO_BUILD_TOOLS)
   install(TARGETS gufo-kernel-bench tune_hipblaslt
@@ -549,11 +581,11 @@ if (BUILD_TESTING)
 
   add_subdirectory(tests/models/embedding_gemma2)
 
-  add_test(NAME gufo_version COMMAND gufo --version)
+  add_test(NAME gufo_version COMMAND gufork --version)
   set_tests_properties(gufo_version PROPERTIES
     LABELS "cpu"
     PASS_REGULAR_EXPRESSION
-      "gufo version ${GUFO_RELEASE_VERSION} \\(${GUFO_REVISION}\\)")
+      "(gufo|gufork) version ${GUFO_RELEASE_VERSION} \\(${GUFO_REVISION}\\)")
 
   add_test(NAME gufo_help COMMAND gufo --help)
   set_tests_properties(gufo_help PROPERTIES LABELS "cpu")
@@ -707,6 +739,11 @@ if (BUILD_TESTING)
 
   add_subdirectory(tests/models/deepseek_v4_flash)
   add_subdirectory(tests/models/qwen38_flash_next)
+
+  add_executable(qwen35moe_test tests/models/qwen35moe_test.cpp)
+  target_link_libraries(qwen35moe_test PRIVATE gufo_qwen35_moe gufo_core)
+  add_test(NAME qwen35moe_test COMMAND qwen35moe_test)
+  set_tests_properties(qwen35moe_test PROPERTIES LABELS "cpu;models;qwen35moe;rocmfp4")
 
   if(ENGINE_ENABLE_HIP)
     add_executable(chat_template_hf_token_golden_test
@@ -1044,6 +1081,12 @@ if (BUILD_TESTING)
 
   add_test(NAME ggml_dequant_test COMMAND ggml_dequant_test)
   set_tests_properties(ggml_dequant_test PROPERTIES LABELS "cpu;core;quant")
+
+  add_executable(rocmfpx_dequant_test tests/core/rocmfpx_dequant_test.cpp)
+  target_link_libraries(rocmfpx_dequant_test PRIVATE gufo_core)
+
+  add_test(NAME rocmfpx_dequant_test COMMAND rocmfpx_dequant_test)
+  set_tests_properties(rocmfpx_dequant_test PROPERTIES LABELS "cpu;core;quant")
 
   add_executable(ggml_gemm_parity_test tests/core/ggml_gemm_parity_test.cpp)
   target_link_libraries(ggml_gemm_parity_test PRIVATE gufo_core)

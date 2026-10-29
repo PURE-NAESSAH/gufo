@@ -32,6 +32,7 @@
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/hip/mtp.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
+#include "src/models/qwen35_moe/engine.hpp"
 #endif
 
 namespace gufo::cli {
@@ -298,6 +299,8 @@ void ResolvePromptSampling(const core::GgufReader& reader, PromptOptions* opt) {
   if (artifact_architecture == "deepseek4") {
     preset = sampling::TextModelPreset::kDeepSeekV4Flash;
   } else if (artifact_architecture == "qwen4exp") {
+    preset = sampling::TextModelPreset::kQwen38;
+  } else if (artifact_architecture == "qwen35moe") {
     preset = sampling::TextModelPreset::kQwen38;
   } else if (const auto config = reader.ExtractModelConfig()) {
     preset = sampling::TextPreset(*config);
@@ -621,15 +624,19 @@ std::shared_ptr<models::qwen::vision::Encoder> LoadQwenVision(
     const PromptOptions& opt, const core::GgufReader& reader) {
   if (opt.image_paths.empty() && opt.vision_model_path.empty())
     return {};
-  if (reader.GetMetadataUint64("qwen35.embedding_length") != 5120) {
+  const bool is_qwen35moe =
+      reader.GetMetadataString("general.architecture") == "qwen35moe";
+  const auto embd_len = reader.GetMetadataUint64("qwen35.embedding_length");
+  if (!is_qwen35moe && embd_len != 5120) {
     throw std::invalid_argument(
-        "image input supports Qwen3.8-27B and Flash-Next");
+        "image input supports Qwen3.8-27B, Flash-Next, and Qwen3.5-MoE");
   }
+  const std::uint32_t width = is_qwen35moe ? 3072U : 5120U;
   auto encoder = models::qwen::vision::Encoder::Open(
-      opt.model_path, opt.vision_model_path, 5120);
+      opt.model_path, opt.vision_model_path, width);
   if (!encoder)
     throw std::invalid_argument(
-        "image input requires a matching --mmproj BF16 sidecar");
+        "image input requires a matching --mmproj sidecar");
   return encoder;
 }
 
@@ -733,6 +740,76 @@ int GenerateFlashNextResponse(const PromptOptions& opt,
                 << " lookup_accepted="
                 << stats.lookup_accepted - stats_before.lookup_accepted << '\n';
     }
+    PrintTokenTrace(generated);
+  }
+  return 0;
+}
+
+std::shared_ptr<models::qwen35_moe::Model> LoadQwen35MoeModel(
+    const PromptOptions& opt, const core::GgufReader& reader,
+    std::chrono::steady_clock::time_point load_start) {
+  std::string error;
+  if (opt.use_chat_template &&
+      !tokenization::QwenChatTemplate::ValidateGgufTemplate(reader, &error)) {
+    std::cerr << "Unsupported Qwen 3.5 MoE chat template: " << error << '\n';
+    return nullptr;
+  }
+  auto model = models::qwen35_moe::Model::Load(
+      opt.model_path,
+      {.max_context = kDefaultContext,
+       .vision_model_path = opt.vision_model_path},
+      &error);
+  PrintModelLoadTime(load_start, model != nullptr);
+  if (!model)
+    std::cerr << "Qwen 3.5 MoE load failed: " << error << '\n';
+  return model;
+}
+
+int GenerateQwen35MoeResponse(const PromptOptions& opt,
+                              const models::qwen35_moe::Model& model,
+                              models::qwen35_moe::Session& session,
+                              std::span<const tokenization::TokenId> prompt,
+                              std::string* reply = nullptr) {
+  if (prompt.empty() || prompt.size() >= session.ContextSize() ||
+      opt.max_tokens > session.ContextSize() - prompt.size()) {
+    std::cerr
+        << "Qwen 3.5 MoE prompt and output exceed the 4096-token CLI context\n";
+    return 1;
+  }
+  std::string error;
+  const std::span<const std::int32_t> prompt_i32(
+      reinterpret_cast<const std::int32_t*>(prompt.data()), prompt.size());
+  if (!session.Sync(prompt_i32, &error)) {
+    std::cerr << "Qwen 3.5 MoE prefill failed: " << error << '\n';
+    return 1;
+  }
+  sampling::SamplerState sampler(opt.sampling, prompt);
+  std::vector<tokenization::TokenId> generated;
+  const auto start = std::chrono::steady_clock::now();
+  while (generated.size() < opt.max_tokens) {
+    models::qwen35_moe::Session::DecodeResult decoded;
+    if (!session.DecodeStep(opt.max_tokens - generated.size(), sampler,
+                            &decoded, &error)) {
+      std::cerr << "Qwen 3.5 MoE decode failed: " << error << '\n';
+      return 1;
+    }
+    for (const auto token : decoded.tokens) {
+      const auto piece = model.TokenText(token);
+      std::cout << piece << std::flush;
+      if (reply)
+        reply->append(piece);
+      generated.push_back(token);
+    }
+    if (decoded.stop)
+      break;
+  }
+  std::cout << '\n';
+  if (opt.verbose) {
+    const double seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+            .count();
+    std::cerr << "Generated " << generated.size() << " tokens ("
+              << generated.size() / seconds << " tok/s)\n";
     PrintTokenTrace(generated);
   }
   return 0;
@@ -1081,6 +1158,33 @@ int RunPrompt(std::span<const char* const> args) {
       return 1;
     }
   }
+  if (reader->GetMetadataString("general.architecture") == "qwen35moe") {
+    auto model = LoadQwen35MoeModel(opt, *reader, model_load_start);
+    if (!model)
+      return 1;
+    auto session =
+        model->CreateSession(gufo::core::SessionMode::kAutoregressive,
+                             kDefaultContext, &err);
+    if (!session) {
+      std::cerr << "Qwen 3.5 MoE session failed: " << err << '\n';
+      return 1;
+    }
+    try {
+      if (!opt.image_paths.empty()) {
+        AttachImages(opt, messages.back());
+        auto vision = PrepareVision(opt, model->tokenizer(), messages,
+                                    model->VisionEncoder());
+        session->ConfigureVision(vision);
+        return GenerateQwen35MoeResponse(opt, *model, *session, vision->tokens);
+      }
+      const auto ids = encode_prompt(model->tokenizer());
+      const std::vector<tokenization::TokenId> prompt(ids.begin(), ids.end());
+      return GenerateQwen35MoeResponse(opt, *model, *session, prompt);
+    } catch (const std::exception& e) {
+      std::cerr << e.what() << '\n';
+      return 1;
+    }
+  }
   int dev_count = 0;
   if (!opt.force_cpu && hipGetDeviceCount(&dev_count) == hipSuccess &&
       dev_count > 0) {
@@ -1253,6 +1357,8 @@ int RunChat(std::span<const char* const> args) {
   std::unique_ptr<speculative::SpeculativeVerifier> verifier;
   std::shared_ptr<models::qwen38_flash_next::Model> flash_model;
   std::unique_ptr<models::qwen38_flash_next::Session> flash_session;
+  std::shared_ptr<models::qwen35_moe::Model> qwen35_model;
+  std::unique_ptr<models::qwen35_moe::Session> qwen35_session;
   if (reader->GetMetadataString("general.architecture") == "qwen4exp") {
     flash_model = LoadFlashNextModel(opt, *reader, model_load_start);
     if (!flash_model)
@@ -1269,6 +1375,20 @@ int RunChat(std::span<const char* const> args) {
     tokenizer = &flash_model->tokenizer();
     architecture = "qwen4exp";
     vision_encoder = flash_model->VisionEncoder();
+  } else if (reader->GetMetadataString("general.architecture") == "qwen35moe") {
+    qwen35_model = LoadQwen35MoeModel(opt, *reader, model_load_start);
+    if (!qwen35_model)
+      return 1;
+    qwen35_session = qwen35_model->CreateSession(
+        gufo::core::SessionMode::kAutoregressive,
+        kDefaultContext, &err);
+    if (!qwen35_session) {
+      std::cerr << "Qwen 3.5 MoE session failed: " << err << '\n';
+      return 1;
+    }
+    tokenizer = &qwen35_model->tokenizer();
+    architecture = "qwen35moe";
+    vision_encoder = qwen35_model->VisionEncoder();
   }
   int device_count = 0;
   if (tokenizer == nullptr && !opt.force_cpu &&
@@ -1369,11 +1489,17 @@ int RunChat(std::span<const char* const> args) {
         prompt_tokens = vision->tokens;
         if (flash_session)
           flash_session->ConfigureVision(vision);
+        if (qwen35_session)
+          qwen35_session->ConfigureVision(vision);
         if (gpu_executor)
           gpu_executor->ConfigureVision(vision, vision_encoder);
       }
       if (flash_model) {
         if (GenerateFlashNextResponse(opt, *flash_model, *flash_session,
+                                      prompt_tokens, &assistant_reply) != 0)
+          return 1;
+      } else if (qwen35_model) {
+        if (GenerateQwen35MoeResponse(opt, *qwen35_model, *qwen35_session,
                                       prompt_tokens, &assistant_reply) != 0)
           return 1;
       } else if (gpu_executor != nullptr) {

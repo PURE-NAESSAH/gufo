@@ -211,7 +211,9 @@ int RunDiagnose(std::span<const char* const> args) {
 
   if (!args.empty()) {
     const std::string_view first = args[0];
-    if (first == "gufo" || first.ends_with("/gufo")) {
+    if (first == "gufo" || first.ends_with("/gufo") || first.ends_with("\\gufo.exe") ||
+        first == "gufork" || first.ends_with("/gufork") || first.ends_with("\\gufork.exe") ||
+        first == "gurfork" || first.ends_with("/gurfork") || first.ends_with("\\gurfork.exe")) {
       start_idx = 1;
     }
   }
@@ -474,7 +476,7 @@ static void CheckGpu() {
 #endif
 
 int RunProbe(std::span<const char* const> args) {
-  ArgParser parser("gufo probe", "Probe GPU availability.");
+  ArgParser parser("gufork probe", "Probe GPU availability.");
   std::string error;
   if (!parser.Parse(args, &error)) {
     std::cerr << "Error: " << error << '\n';
